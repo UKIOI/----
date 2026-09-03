@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <title>霓虹乱斗 · 本地版</title><link rel="stylesheet" href="/static/style.css?v=11">
+</head>
+<body>
+  <div id="rotateNotice"><div>↻<b>请将手机横屏</b><small>横屏后游戏会自动适配可用画面</small></div></div>
+  <main id="menu">
+    <section class="card"><div class="logo">⚡</div><h1>霓虹乱斗</h1><p>本地 / 局域网 2D 多人混战</p>
+      <label>你的昵称<input id="name" maxlength="12" value="玩家"></label>
+      <label>房间号<input id="room" maxlength="10" value="PUBLIC"></label>
+      <label>玩法模式<select id="mode">
+        <option value="classic">经典模式 · 道具数等于人数</option>
+        <option value="items">多道具模式 · 三倍道具</option>
+        <option value="pure">纯净模式 · 无道具</option>
+        <option value="profession">职业模式 · 职业技能与血包</option>
+      </select></label>
+      <button id="join">加入战斗</button><small>本地版不会创建互联网公网网址</small>
+    </section>
+  </main>
+  <div id="game" hidden><canvas id="canvas"></canvas><div id="hud"><b id="roomLabel"></b><span id="status">连接中…</span><em id="powerups"></em></div>
+    <div id="help"><span class="desktop-help">WASD / 方向键移动　·　鼠标瞄准　·　按住左键射击　·　拾取发光道具强化武器　·　ESC 返回</span><span class="touch-help">左轮盘移动　·　右轮盘瞄准并射击</span></div>
+    <div id="joystick" aria-label="移动摇杆"><div id="joystickKnob"></div></div>
+    <div id="aimJoystick" aria-label="射击摇杆"><div id="aimJoystickKnob"></div></div>
+    <button id="skillButton" hidden>圣盾</button>
+    <button id="chatToggle" aria-label="打开聊天">💬 聊天 <i id="chatUnread" hidden></i></button>
+    <section id="chatPanel" hidden aria-label="房间聊天">
+      <header><b>房间聊天</b><button id="chatClose" aria-label="关闭聊天">×</button></header>
+      <div id="chatMessages" aria-live="polite"><p class="chat-tip">和同一房间的玩家打个招呼吧</p></div>
+      <form id="chatForm" autocomplete="off"><input id="chatInput" maxlength="120" placeholder="输入消息（最多120字）"><button type="submit">发送</button></form>
+    </section>
+    <section id="roles" hidden><div class="role-card"><h2>选择职业</h2><p>选定后立即进入战场</p><div class="role-grid">
+      <button data-role="tank"><b>▣ 坦克</b><small>300 生命值</small></button>
+      <button data-role="mage"><b>✹ 法师</b><small>1.5 倍范围爆炸弹</small></button>
+      <button data-role="sniper"><b>⌖ 狙击手</b><small>高速、三倍伤害</small></button>
+      <button data-role="necromancer"><b>☠ 死灵法师</b><small>击杀敌人转化随从</small></button>
+      <button data-role="weaponmaster"><b>⚒ 武器大师</b><small>每 20 秒获得随机武器</small></button>
+      <button data-role="paladin"><b>✧ 圣骑士</b><small>空格：无敌并加速 5 秒</small></button>
+    </div></div></section>
+  </div>
+  <script src="/static/game.js?v=26"></script>
+</body></html>

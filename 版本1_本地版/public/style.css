@@ -1,0 +1,88 @@
+:root { font-family: Inter, "Microsoft YaHei", sans-serif; color: #eef6ff; background: #080d1b; --view-width: 100vw; --view-height: 100vh; }
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; }
+body { margin: 0; overflow: hidden; overscroll-behavior: none; background: radial-gradient(circle at 50% 20%, #19274c, #080d1b 65%); }
+#menu { width: var(--view-width); height: var(--view-height); display: grid; place-items: center; overflow: auto; padding: max(10px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left)); }
+.card { width: min(90vw, 390px); padding: 36px; border: 1px solid #314878; border-radius: 24px; background: #101a32dd; box-shadow: 0 25px 80px #0009; text-align: center; }
+.logo { font-size: 48px; }
+h1 { font-size: 38px; margin: 5px 0; color: #72f1d0; text-shadow: 0 0 25px #38d9b766; }
+.card p { color: #aab9d5; margin: 0 0 28px; }
+.card label { display: block; text-align: left; color: #9eadc9; font-size: 13px; margin-top: 15px; }
+.card input, .card select { width: 100%; margin-top: 7px; padding: 13px 15px; border: 1px solid #334a78; border-radius: 10px; background: #091226; color: white; font-size: 16px; outline: none; }
+.card input:focus, .card select:focus { border-color: #55d6be; }
+.card button { width: 100%; margin-top: 24px; padding: 14px; border: 0; border-radius: 11px; background: linear-gradient(135deg, #55d6be, #4597ff); color: #07101c; font-weight: 800; font-size: 17px; cursor: pointer; }
+.card small { display: block; margin-top: 18px; color: #7485a5; }
+#game { position: fixed; left: 0; top: 0; width: var(--view-width); height: var(--view-height); overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+canvas { width: var(--view-width); height: var(--view-height); }
+canvas { display: block; cursor: crosshair; touch-action: none; }
+#hud, #help { position: fixed; z-index: 2; background: #0b1328cc; border: 1px solid #314878; backdrop-filter: blur(8px); }
+#hud { top: 16px; left: 16px; padding: 10px 15px; border-radius: 10px; }
+#hud, #help { pointer-events: none; }
+#hud b { color: #72f1d0; margin-right: 18px; }
+#status { color: #b7c5df; }
+#powerups { display: block; margin-top: 7px; color: #ffd166; font-size: 12px; font-style: normal; }
+#help { bottom: 15px; left: 50%; transform: translateX(-50%); padding: 8px 14px; border-radius: 8px; color: #96a8c7; font-size: 13px; white-space: nowrap; }
+.touch-help, #joystick, #aimJoystick { display: none; }
+#skillButton { display: none; position: fixed; right: max(42px, env(safe-area-inset-right)); bottom: min(176px, 40vh); z-index: 4; width: 76px; height: 44px; border: 2px solid #ffe48a; border-radius: 22px; background: #8a6819dd; color: white; font-weight: 800; box-shadow: 0 0 20px #ffd16666; touch-action: none; }
+#skillButton[disabled] { opacity: .48; filter: grayscale(.5); }
+#chatToggle { position: fixed; top: 16px; right: 16px; z-index: 6; min-width: 86px; padding: 9px 13px; border: 1px solid #42618f; border-radius: 18px; background: #101a32e8; color: #eef6ff; font-weight: 700; cursor: pointer; box-shadow: 0 8px 24px #0007; }
+#chatToggle[hidden] { display: none; }
+#chatUnread { display: inline-block; width: 9px; height: 9px; margin-left: 4px; border-radius: 50%; background: #ff5d73; box-shadow: 0 0 10px #ff5d73; }
+#chatUnread[hidden] { display: none; }
+#chatPanel { position: fixed; top: 14px; right: 14px; z-index: 7; display: flex; flex-direction: column; width: min(340px, calc(var(--view-width) - 28px)); height: min(350px, calc(var(--view-height) - 28px)); border: 1px solid #42618f; border-radius: 16px; overflow: hidden; background: #091329f2; box-shadow: 0 18px 55px #000b; backdrop-filter: blur(12px); }
+#chatPanel[hidden] { display: none; }
+#chatPanel header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 9px 15px; border-bottom: 1px solid #293d65; color: #72f1d0; }
+#chatClose { width: 30px; height: 30px; padding: 0; border: 0; border-radius: 50%; background: #1b2a49; color: #dce8ff; font-size: 21px; cursor: pointer; }
+#chatMessages { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 13px; overscroll-behavior: contain; }
+.chat-tip { margin: 4px 0; color: #7586a7; font-size: 12px; text-align: center; }
+.chat-message { margin: 0 0 8px; color: #dce7fa; font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+.chat-message b { margin-right: 7px; }
+#chatForm { display: flex; gap: 7px; padding: 10px; border-top: 1px solid #293d65; }
+#chatInput { flex: 1; min-width: 0; padding: 9px 11px; border: 1px solid #334a78; border-radius: 9px; outline: none; background: #071022; color: #fff; font-size: 14px; }
+#chatInput:focus { border-color: #55d6be; }
+#chatForm button { padding: 8px 12px; border: 0; border-radius: 9px; background: #55d6be; color: #07101c; font-weight: 800; cursor: pointer; }
+#joystick { position: fixed; left: 24px; bottom: 32px; z-index: 4; width: 126px; height: 126px; border: 2px solid #72f1d088; border-radius: 50%; background: #0b1933aa; box-shadow: inset 0 0 28px #55d6be22, 0 0 24px #0008; touch-action: none; }
+#joystick::after { content: "移动"; position: absolute; inset: 0; display: grid; place-items: center; color: #8aa0c4; font-size: 11px; pointer-events: none; }
+#joystickKnob { position: absolute; left: 50%; top: 50%; width: 54px; height: 54px; transform: translate(-50%, -50%); border: 2px solid #baffed; border-radius: 50%; background: #55d6beaa; box-shadow: 0 0 20px #55d6be88; pointer-events: none; }
+#aimJoystick { position: fixed; right: 24px; bottom: 32px; z-index: 4; width: 126px; height: 126px; border: 2px solid #ff7b9d88; border-radius: 50%; background: #271126aa; box-shadow: inset 0 0 28px #ff5d7322, 0 0 24px #0008; touch-action: none; }
+#aimJoystick::after { content: "瞄准射击"; position: absolute; inset: 0; display: grid; place-items: center; color: #b78da8; font-size: 11px; pointer-events: none; }
+#aimJoystickKnob { position: absolute; left: 50%; top: 50%; width: 54px; height: 54px; transform: translate(-50%, -50%); border: 2px solid #ffd4df; border-radius: 50%; background: #ff5d73aa; box-shadow: 0 0 20px #ff5d7388; pointer-events: none; }
+#rotateNotice { display: none; position: fixed; left: 0; top: 0; width: var(--view-width); height: var(--view-height); z-index: 20; place-items: center; background: #070d1cf2; text-align: center; }
+#rotateNotice div { display: grid; gap: 10px; color: #72f1d0; font-size: 50px; }
+#rotateNotice b { color: #eef6ff; font-size: 22px; }
+#rotateNotice small { color: #91a3c3; font-size: 13px; }
+#roles { position: fixed; left: 0; top: 0; width: var(--view-width); height: var(--view-height); z-index: 5; display: grid; place-items: center; background: #050a16cc; backdrop-filter: blur(8px); }
+#roles[hidden] { display: none; }
+.role-card { width: min(92vw, 650px); padding: 30px; border: 1px solid #42618f; border-radius: 22px; background: #101a32; text-align: center; box-shadow: 0 24px 90px #000b; }
+.role-card h2 { margin: 0; font-size: 30px; color: #72f1d0; }
+.role-card p { color: #9eadc9; }
+.role-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; margin-top: 22px; }
+.role-grid button { padding: 19px 12px; border: 1px solid #38517f; border-radius: 13px; background: #0a1429; color: #eef6ff; cursor: pointer; }
+.role-grid button:hover { border-color: #72f1d0; transform: translateY(-2px); }
+.role-grid b, .role-grid small { display: block; }
+.role-grid b { font-size: 17px; margin-bottom: 7px; }
+.role-grid small { color: #91a3c3; }
+@media (hover: none), (pointer: coarse), (max-width: 650px) {
+  #joystick, #aimJoystick { display: block; }
+  #skillButton:not([hidden]) { display: block; }
+  .desktop-help { display: none; }
+  .touch-help { display: inline; }
+  #joystick { left: max(14px, env(safe-area-inset-left)); bottom: max(18px, env(safe-area-inset-bottom)); width: min(126px, 29vh); height: min(126px, 29vh); }
+  #aimJoystick { right: max(14px, env(safe-area-inset-right)); bottom: max(18px, env(safe-area-inset-bottom)); width: min(126px, 29vh); height: min(126px, 29vh); }
+  #joystickKnob, #aimJoystickKnob { width: 43%; height: 43%; }
+  #help { bottom: max(6px, env(safe-area-inset-bottom)); font-size: 10px; width: auto; max-width: calc(var(--view-width) - 300px); left: 50%; transform: translateX(-50%); text-align: center; white-space: normal; pointer-events: none; }
+  #hud { top: max(6px, env(safe-area-inset-top)); left: max(6px, env(safe-area-inset-left)); max-width: calc(var(--view-width) - 12px); padding: 7px 10px; font-size: 11px; }
+  #powerups { margin-top: 4px; font-size: 10px; }
+  #chatToggle { top: max(6px, env(safe-area-inset-top)); right: max(6px, env(safe-area-inset-right)); min-width: 74px; padding: 7px 10px; font-size: 12px; }
+  #chatPanel { top: max(5px, env(safe-area-inset-top)); right: max(5px, env(safe-area-inset-right)); width: min(370px, calc(var(--view-width) - 10px)); height: min(310px, calc(var(--view-height) - 10px)); }
+}
+@media (hover: none) and (orientation: portrait), (pointer: coarse) and (orientation: portrait) { #rotateNotice { display: grid; } }
+@media (orientation: landscape) and (max-height: 500px) {
+  .role-card { width: min(88vw, 650px); padding: 14px 20px; }
+  .role-card h2 { font-size: 21px; }
+  .role-card p { margin: 5px 0; font-size: 12px; }
+  .role-grid { margin-top: 10px; gap: 8px; }
+  .role-grid button { padding: 9px 8px; }
+  .role-grid b { font-size: 14px; margin-bottom: 3px; }
+  .role-grid small { font-size: 10px; }
+}
