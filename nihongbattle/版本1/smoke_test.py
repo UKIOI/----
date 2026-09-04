@@ -122,7 +122,7 @@ async def main():
     async with aiohttp.ClientSession() as session:
         async with session.get(f"{base_url}/health") as response:
             health = await response.json()
-            assert health == {"game": "neon-brawl", "edition": "internet", "status": "ok", "protocol": 13}, "互联网版健康检查标识错误"
+            assert health == {"game": "neon-brawl", "edition": "internet", "status": "ok", "protocol": 12}, "互联网版健康检查标识错误"
         async with session.get(f"{base_url}/") as response:
             assert response.status == 200
             page = await response.text()
@@ -130,10 +130,10 @@ async def main():
             assert 'data-role="weaponmaster"' in page and 'data-role="paladin"' in page and 'id="skillButton"' in page, "新职业界面未加载"
             assert 'id="joystick"' in page and 'id="aimJoystick"' in page, "手机双轮盘界面未加载"
             assert 'id="chatToggle"' in page and 'id="chatPanel"' in page and 'id="chatForm"' in page, "折叠聊天界面未加载"
-        async with session.get(f"{base_url}/static/game.js?v=31") as response:
+        async with session.get(f"{base_url}/static/game.js?v=29") as response:
             mobile_script = await response.text()
             assert "visualViewport" in mobile_script and "viewWidth" in mobile_script and "orientationchange" in mobile_script, "动态横屏适配脚本未加载"
-            assert "viewScale" in mobile_script and "motionTracks" in mobile_script and "function visible" in mobile_script, "移动端视野或性能优化未加载"
+            assert "viewScale" in mobile_script and "smoothPositions" in mobile_script and "function visible" in mobile_script, "移动端视野或性能优化未加载"
             assert "touchMove" in mobile_script and "touchAim" in mobile_script and 'aimJoystick.addEventListener("pointerdown"' in mobile_script, "双轮盘输入脚本未加载"
             assert "KEY_CODES" in mobile_script and "sendInput(performance.now(), true)" in mobile_script, "公网键盘兼容输入脚本未加载"
             assert "appendChatMessage" in mobile_script and "message.textContent" in mobile_script and "stopGameInput" in mobile_script, "安全聊天或输入隔离脚本未加载"
@@ -141,7 +141,6 @@ async def main():
             assert "updateLocalPrediction" in mobile_script and "reconcilePrediction" in mobile_script and "updateLatency" in mobile_script, "本机移动预测或延迟检测脚本未加载"
             assert "lastStopSequence" in mobile_script and "inputSequence" in mobile_script, "停止输入确认脚本未加载"
             assert "stateReceivedAt" in mobile_script and "bulletX" in mobile_script and "drawProjectiles(now)" in mobile_script, "子弹帧间预测脚本未加载"
-            assert "REMOTE_INTERPOLATION_MS" in mobile_script and "synchronizedSnapshotTime" in mobile_script and "sampledMotionPoint" in mobile_script, "远端实体时间轴插值未加载"
             assert "extrapolatedBulletPosition" in mobile_script, "子弹预测缺少墙体碰撞限制"
             assert all(marker in mobile_script for marker in ("visualBullet", "aimOrigin", "move_x", "input_seq", "baseLead", "perpendicular", "ws.bufferedAmount")), "移动、停止确认、瞄准或匀速校正优化未加载"
             assert "stop_x" not in mobile_script and "predictionHoldUntil" not in mobile_script, "旧的停止补位逻辑仍在客户端"
@@ -154,7 +153,7 @@ async def main():
         first_welcome = json.loads((await first.receive()).data)
         second_welcome = json.loads((await second.receive()).data)
         assert first_welcome["room"] == run_id and second_welcome["room"] == run_id
-        assert first_welcome["protocol"] == 13 and first_welcome["edition"] == "internet" and len(first_welcome["obstacles"]) > 8, "初始地形或压缩协议未发送"
+        assert first_welcome["protocol"] == 12 and first_welcome["edition"] == "internet" and len(first_welcome["obstacles"]) > 8, "初始地形或压缩协议未发送"
         for _ in range(10):
             state = json.loads((await first.receive()).data)
             if state.get("type") == "state" and len(state["players"]) == 2:
@@ -162,7 +161,6 @@ async def main():
         else:
             raise AssertionError("两个客户端未收到同一房间的状态")
         assert len(state["pickups"]) == len(state["players"]) == 2, "道具数量没有跟随在线人数"
-        assert isinstance(state.get("server_time"), (int, float)), "状态帧缺少服务器时间戳"
         assert all(pickup["kind"] in {"damage", "rapid", "multishot", "laser", "shield", "speed", "beam", "health", "ricochet", "cannon", "minion"}
                    for pickup in state["pickups"]), "出现未知道具"
         assert "obstacles" not in state and state.get("destroyed") == [], "状态帧仍在重复发送完整地形"
@@ -227,7 +225,7 @@ async def main():
                 break
         else:
             raise AssertionError("射击后未生成玩家颜色的子弹")
-        assert all(key in owned_bullet for key in ("id", "vx", "vy", "owner", "age")), "子弹稳定标识、速度、发射者或弹龄没有同步到客户端"
+        assert all(key in owned_bullet for key in ("vx", "vy", "owner", "age")), "子弹速度、发射者或弹龄没有同步到客户端"
         await second.close()
         for _ in range(20):
             state = json.loads((await first.receive()).data)
@@ -257,7 +255,7 @@ async def main():
         profession = await session.ws_connect(f"{base_url}/ws")
         await profession.send_json({"name": "职业测试", "room": f"R{run_id}", "mode": "profession"})
         profession_welcome = json.loads((await profession.receive()).data)
-        assert profession_welcome["mode"] == "profession" and profession_welcome["protocol"] == 13
+        assert profession_welcome["mode"] == "profession" and profession_welcome["protocol"] == 12
         waiting = json.loads((await profession.receive()).data)
         pro_player = waiting["players"][0]
         assert not pro_player["ready"] and len(waiting["pickups"]) == 1 and waiting["pickups"][0]["kind"] == "health", "职业选择前状态或血包规则错误"

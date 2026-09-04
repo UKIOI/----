@@ -28,7 +28,6 @@ const POWERUPS = {
   cannon: { icon: "●", name: "攻城大炮", color: "#ff7b39" }, minion: { icon: "◉", name: "战斗随从", color: "#72f1d0" },
   invincible: { icon: "✧", name: "神圣无敌", color: "#ffe17a" },
 };
-const PROTOCOL_VERSION = 13;
 let ws, myId = null, requestedMode = "classic", world = { width: 1600, height: 900 };
 let state = { players: [], bullets: [], lasers: [], explosions: [], pickups: [], obstacles: [] };
 let keys = {}, mouse = { x: 0, y: 0, down: false }, touchMove = { x: 0, y: 0 }, touchAim = { x: 1, y: 0, active: false };
@@ -41,13 +40,10 @@ const viewScale = mobileMode ? .72 : 1;
 let camera = { x: 0, y: 0 }, lastSend = 0, receivedState = false, stateReceivedAt = performance.now();
 let unreadChats = 0;
 let predictedSelf = null, lastFrame = performance.now(), lastPing = 0, latency = null;
-let predictionBlocked = false, inputSequence = 0, lastStopSequence = -1, lastSentMoving = false;
+let predictionWasMoving = false, predictionHoldUntil = 0, predictionBlocked = false;
 let viewWidth = innerWidth, viewHeight = innerHeight, sceneWidth = innerWidth / viewScale, sceneHeight = innerHeight / viewScale;
 const speedTrails = new Map();
-const motionTracks = new Map();
-const REMOTE_INTERPOLATION_MS = 85;
-const REMOTE_EXTRAPOLATION_MS = 45;
-let serverClockOffset = null;
+const smoothPositions = new Map();
 function resize() {
   const viewport = window.visualViewport;
   const ratio = Math.min(devicePixelRatio || 1, mobileMode ? 1.5 : 2);
@@ -71,20 +67,20 @@ function connect() {
   ws.onmessage = event => {
     const data = JSON.parse(event.data);
     if (data.type === "welcome") {
-      if (data.protocol !== PROTOCOL_VERSION || data.mode !== requestedMode) {
+      if (data.protocol !== 10 || data.mode !== requestedMode) {
         alert("客户端与服务器版本不一致，请重启服务器并强制刷新页面");
         ws.close();
         return;
       }
-      myId = data.id; world = data; state.obstacles = data.obstacles || []; predictedSelf = null; motionTracks.clear(); serverClockOffset = null; inputSequence = 0; lastStopSequence = -1; lastSentMoving = false; lastPing = 0; menu.hidden = true; game.hidden = false; canvas.tabIndex = 0; canvas.focus();
+      myId = data.id; world = data; state.obstacles = data.obstacles || []; predictedSelf = null; predictionWasMoving = false; predictionHoldUntil = 0; lastPing = 0; menu.hidden = true; game.hidden = false; canvas.tabIndex = 0; canvas.focus();
       document.querySelector("#roomLabel").textContent = `房间 ${data.room} · ${MODE_NAMES[data.mode]}`;
       statusLabel.textContent = data.mode === "profession" ? "请选择职业" : "正在载入战场…";
       rolePanel.hidden = data.mode !== "profession";
     } else if (data.type === "state") {
-      const receivedAt = performance.now(), destroyed = new Map(data.destroyed || []);
+      const destroyed = new Map(data.destroyed || []);
       data.obstacles = (state.obstacles || []).map(obstacle => ({ ...obstacle, active: !destroyed.has(obstacle.id), restore: destroyed.get(obstacle.id) || 0 }));
       reconcilePrediction(data.players.find(player => player.id === myId));
-      recordMotionSnapshots(data, synchronizedSnapshotTime(data.server_time, receivedAt)); recordSpeedTrails(data.players); state = data; stateReceivedAt = receivedAt; receivedState = true; const me = data.players.find(player => player.id === myId);
+      recordSpeedTrails(data.players); state = data; stateReceivedAt = performance.now(); receivedState = true; const me = data.players.find(player => player.id === myId);
       if (requestedMode === "profession") rolePanel.hidden = me?.ready === true;
       const isPaladin = me?.ready && me.role === "paladin";
       skillButton.hidden = !isPaladin;
@@ -111,7 +107,6 @@ skillButton.addEventListener("pointerdown", event => {
 });
 function stopGameInput() {
   keys = {}; mouse.down = false; touchMove.x = 0; touchMove.y = 0; touchAim.active = false;
-  movePointer = null; aimPointer = null;
   joystickKnob.style.left = "50%"; joystickKnob.style.top = "50%";
   aimJoystickKnob.style.left = "50%"; aimJoystickKnob.style.top = "50%";
   sendInput(performance.now(), true);
@@ -153,7 +148,6 @@ const KEY_CODES = { KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d", ArrowUp: "arrowu
 function updateKey(event, pressed) {
   if (event.target.matches?.("input, textarea, select")) return;
   const key = KEY_CODES[event.code] || event.key.toLowerCase();
-  if (pressed && event.repeat) { if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(key)) event.preventDefault(); return; }
   keys[key] = pressed;
   if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(key)) {
     event.preventDefault();
@@ -162,8 +156,7 @@ function updateKey(event, pressed) {
 }
 addEventListener("keydown", event => { updateKey(event, true); if (event.code === "Escape" || event.key === "Escape") { ws?.close(); location.reload(); } });
 addEventListener("keyup", event => updateKey(event, false));
-addEventListener("blur", stopGameInput);
-document.addEventListener("visibilitychange", () => { if (document.hidden) stopGameInput(); });
+addEventListener("blur", () => { keys = {}; mouse.down = false; touchMove.x = 0; touchMove.y = 0; touchAim.active = false; sendInput(performance.now(), true); });
 canvas.addEventListener("pointermove", event => {
   if (event.pointerType !== "touch") { mouse.x = event.clientX; mouse.y = event.clientY; }
 });
@@ -225,19 +218,17 @@ aimJoystick.addEventListener("pointerup", resetAimJoystick); aimJoystick.addEven
 addEventListener("pointerup", event => { resetJoystick(event); resetAimJoystick(event); });
 addEventListener("pointercancel", event => { resetJoystick(event); resetAimJoystick(event); });
 function sendInput(now = performance.now(), force = false) {
-  if (!ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > (force ? 1048576 : 65536) || (!force && now - lastSend < 33)) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN || (!force && (now - lastSend < 33 || ws.bufferedAmount > 65536))) return; lastSend = now;
   const me = state.players.find(player => player.id === myId); if (!me) return;
   if (requestedMode === "profession" && me.ready !== true) return;
   const movement = currentMoveVector(), aimOrigin = predictedSelf || me, canvasRect = canvas.getBoundingClientRect();
   const screenX = canvasRect.left + (aimOrigin.x - camera.x) * viewScale, screenY = canvasRect.top + (aimOrigin.y - camera.y) * viewScale;
   const angle = touchAim.active ? Math.atan2(touchAim.y, touchAim.x) : Math.atan2(mouse.y - screenY, mouse.x - screenX);
-  const sequence = ++inputSequence;
-  if (lastSentMoving && !movement.moving) lastStopSequence = sequence;
-  lastSentMoving = movement.moving; lastSend = now;
-  ws.send(JSON.stringify({ type: "input", seq: sequence,
+  ws.send(JSON.stringify({ type: "input",
     up: keys.w || keys.arrowup || touchMove.y < -.18, down: keys.s || keys.arrowdown || touchMove.y > .18,
     left: keys.a || keys.arrowleft || touchMove.x < -.18, right: keys.d || keys.arrowright || touchMove.x > .18,
-    move_x: movement.x, move_y: movement.y,
+    move_x: movement.x, move_y: movement.y, stop_x: movement.moving ? undefined : aimOrigin.x,
+    stop_y: movement.moving ? undefined : aimOrigin.y,
     shoot: mouse.down || touchAim.active, ability: Boolean(keys[" "]), angle }));
 }
 function visible(x, y, width = 0, height = 0, margin = 70) {
@@ -253,8 +244,13 @@ function currentMoveVector() {
   const strength = Math.min(1, (length - .12) / .88);
   return { x: x / length * strength, y: y / length * strength, moving: true };
 }
+function beginPredictionHold(now = performance.now()) {
+  predictionWasMoving = false;
+  const local = world.edition === "local";
+  predictionHoldUntil = now + (local ? 55 : Math.min(180, Math.max(75, (latency ?? 140) * .5 + 30)));
+}
 function reconcilePrediction(me) {
-  if (!me?.ready || me.hp <= 0) { predictedSelf = null; lastStopSequence = -1; lastSentMoving = false; return; }
+  if (!me?.ready || me.hp <= 0) { predictedSelf = null; predictionWasMoving = false; predictionHoldUntil = 0; return; }
   const error = predictedSelf ? Math.hypot(predictedSelf.x - me.x, predictedSelf.y - me.y) : Infinity;
   if (!predictedSelf || error > 260) {
     predictedSelf = { x: me.x, y: me.y }; return;
@@ -269,21 +265,23 @@ function predictedCircleHitsRect(x, y, radius, obstacle) {
 function updateLocalPrediction(now) {
   const dt = Math.min(Math.max(0, now - lastFrame) / 1000, .05); lastFrame = now;
   const me = state.players.find(player => player.id === myId);
-  if (!me?.ready || me.hp <= 0) { predictedSelf = null; lastStopSequence = -1; lastSentMoving = false; return; }
+  if (!me?.ready || me.hp <= 0) { predictedSelf = null; predictionWasMoving = false; predictionHoldUntil = 0; return; }
   if (!predictedSelf) predictedSelf = { x: me.x, y: me.y };
   const movement = currentMoveVector();
   const speed = 300 * (me.effects?.speed ? 1.45 : 1), radius = 25;
   predictionBlocked = false;
   if (movement.moving) {
+    predictionWasMoving = true; predictionHoldUntil = 0;
     const nextX = Math.max(radius, Math.min(world.width - radius, predictedSelf.x + movement.x * speed * dt));
     if (!(state.obstacles || []).some(obstacle => predictedCircleHitsRect(nextX, predictedSelf.y, radius, obstacle))) predictedSelf.x = nextX; else predictionBlocked = true;
     const nextY = Math.max(radius, Math.min(world.height - radius, predictedSelf.y + movement.y * speed * dt));
     if (!(state.obstacles || []).some(obstacle => predictedCircleHitsRect(predictedSelf.x, nextY, radius, obstacle))) predictedSelf.y = nextY; else predictionBlocked = true;
-  }
-  if (!movement.moving && lastStopSequence >= 0 && (me.input_seq ?? -1) < lastStopSequence) return;
-  const stateAge = Math.max(0, now - stateReceivedAt) / 1000;
-  const baseLead = Math.min(.16, Math.max(.025, (latency ?? 140) / 2000));
-  const lead = movement.moving ? Math.min(.2, baseLead + stateAge) : 0;
+  } else if (predictionWasMoving) beginPredictionHold(now);
+  const serverMoving = Math.hypot(me.move_x || 0, me.move_y || 0) > .01;
+  if (!movement.moving && (now < predictionHoldUntil || serverMoving)) return;
+  const local = world.edition === "local", stateAge = Math.max(0, now - stateReceivedAt) / 1000;
+  const baseLead = local ? 0 : Math.min(.14, Math.max(.035, (latency ?? 140) / 2000 + 1 / (world.network_rate || 25)));
+  const lead = movement.moving ? (local ? 0 : Math.min(.19, baseLead + stateAge)) : 0;
   let targetX = me.x, targetY = me.y;
   const targetNextX = Math.max(radius, Math.min(world.width - radius, targetX + movement.x * speed * lead));
   if (!(state.obstacles || []).some(obstacle => predictedCircleHitsRect(targetNextX, targetY, radius, obstacle))) targetX = targetNextX;
@@ -292,113 +290,33 @@ function updateLocalPrediction(now) {
   const errorX = targetX - predictedSelf.x, errorY = targetY - predictedSelf.y, error = Math.hypot(errorX, errorY);
   if (error > 260) { predictedSelf.x = targetX; predictedSelf.y = targetY; return; }
   if (error < .15) return;
-  if (!movement.moving) {
-    if (error <= 10) { predictedSelf.x = targetX; predictedSelf.y = targetY; return; }
-    const step = Math.min(error * (1 - Math.exp(-12 * dt)), 240 * dt);
-    predictedSelf.x += errorX / error * step; predictedSelf.y += errorY / error * step;
-    return;
-  }
-  if (predictionBlocked) {
-    const step = Math.min(error * (1 - Math.exp(-12 * dt)), 300 * dt);
-    predictedSelf.x += errorX / error * step; predictedSelf.y += errorY / error * step;
-    return;
-  }
-  // 横向误差快速修正；前进方向保留一小段容差，避免网络状态帧让速度忽快忽慢。
-  const parallel = errorX * movement.x + errorY * movement.y;
-  const perpendicularX = errorX - parallel * movement.x, perpendicularY = errorY - parallel * movement.y;
-  const perpendicularLength = Math.hypot(perpendicularX, perpendicularY);
-  if (perpendicularLength > .15) {
-    const step = Math.min(perpendicularLength * (1 - Math.exp(-10 * dt)), 180 * dt);
-    predictedSelf.x += perpendicularX / perpendicularLength * step; predictedSelf.y += perpendicularY / perpendicularLength * step;
-  }
-  const excess = Math.max(0, Math.abs(parallel) - 32) * Math.sign(parallel);
-  if (excess) {
-    const step = Math.sign(excess) * Math.min(Math.abs(excess) * (1 - Math.exp(-2.5 * dt)), 55 * dt);
-    predictedSelf.x += movement.x * step; predictedSelf.y += movement.y * step;
-  }
+  const alpha = 1 - Math.exp(-(local ? 11 : predictionBlocked ? 12 : 7) * dt);
+  const maxStep = (local ? 440 : predictionBlocked ? 440 : 300) * dt, step = Math.min(error * alpha, maxStep);
+  predictedSelf.x += errorX / error * step; predictedSelf.y += errorY / error * step;
 }
 function updateLatency(now) {
   if (!ws || ws.readyState !== WebSocket.OPEN || now - lastPing < 2000) return;
   lastPing = now; ws.send(JSON.stringify({ type: "ping", sent: now }));
 }
-function synchronizedSnapshotTime(serverTime, receivedAt) {
-  if (!Number.isFinite(serverTime)) return receivedAt;
-  const measuredOffset = receivedAt - serverTime;
-  if (serverClockOffset === null) serverClockOffset = measuredOffset;
-  else {
-    const difference = measuredOffset - serverClockOffset;
-    // 网络包偶尔晚到时不要把时间轴向后猛拉；更低延迟的样本则较快校准时钟。
-    const adjustment = difference * (difference < 0 ? .2 : .015);
-    serverClockOffset += Math.max(-8, Math.min(2, adjustment));
-  }
-  return serverTime + serverClockOffset;
+function smoothPoint(key, x, y) {
+  let point = smoothPositions.get(key);
+  if (!point || Math.hypot(point.x - x, point.y - y) > 420) point = { x, y };
+  point.x += (x - point.x) * .38; point.y += (y - point.y) * .38;
+  smoothPositions.set(key, point); return point;
 }
-function recordMotionSample(key, x, y, time, vx, vy, moving) {
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-  let track = motionTracks.get(key), samples = track?.samples || [], last = samples.at(-1);
-  if (last && Math.hypot(last.x - x, last.y - y) > 420) { samples = []; last = null; }
-  if (last && time <= last.time) time = last.time + 1;
-  const elapsed = last ? Math.max(.001, (time - last.time) / 1000) : 0;
-  const sampleVx = Number.isFinite(vx) ? vx : last ? (x - last.x) / elapsed : 0;
-  const sampleVy = Number.isFinite(vy) ? vy : last ? (y - last.y) / elapsed : 0;
-  const sampleMoving = typeof moving === "boolean" ? moving : Math.hypot(sampleVx, sampleVy) > 8;
-  const sample = { x, y, time, vx: sampleVx, vy: sampleVy, moving: sampleMoving };
-  if (!samples.length && sampleMoving) {
-    const delay = REMOTE_INTERPOLATION_MS / 1000;
-    samples.push({ ...sample, x: x - sampleVx * delay, y: y - sampleVy * delay, time: time - REMOTE_INTERPOLATION_MS });
-  }
-  samples.push(sample);
-  if (samples.length > 8) samples.splice(0, samples.length - 8);
-  motionTracks.set(key, { samples, lastSeen: time });
-}
-function recordMotionSnapshots(snapshot, receivedAt) {
+function smoothedPlayers() {
   const seen = new Set();
-  for (const player of snapshot.players || []) {
-    if (player.id !== myId) {
-      const key = `p${player.id}`, speed = 300 * (player.effects?.speed ? 1.45 : 1);
-      const moveX = Number(player.move_x) || 0, moveY = Number(player.move_y) || 0;
-      recordMotionSample(key, player.x, player.y, receivedAt, moveX * speed, moveY * speed, Math.hypot(moveX, moveY) > .01);
-      seen.add(key);
-    }
-    for (const minion of player.minions || []) {
-      const key = `m${player.id}:${minion.id}`;
-      recordMotionSample(key, minion.x, minion.y, receivedAt);
-      seen.add(key);
-    }
-  }
-  for (const bullet of snapshot.bullets || []) {
-    if (bullet.owner === myId || bullet.id === undefined) continue;
-    const key = `b${bullet.id}`;
-    recordMotionSample(key, bullet.x, bullet.y, receivedAt, bullet.vx || 0, bullet.vy || 0, true);
-    seen.add(key);
-  }
-  for (const key of motionTracks.keys()) if (!seen.has(key)) motionTracks.delete(key);
-}
-function sampledMotionPoint(key, now, fallbackX, fallbackY) {
-  const track = motionTracks.get(key), samples = track?.samples;
-  if (!samples?.length) return { x: fallbackX, y: fallbackY };
-  const renderTime = now - REMOTE_INTERPOLATION_MS;
-  while (samples.length > 2 && samples[1].time <= renderTime) samples.shift();
-  const first = samples[0], second = samples[1];
-  if (second && renderTime <= second.time) {
-    const span = Math.max(1, second.time - first.time), amount = Math.max(0, Math.min(1, (renderTime - first.time) / span));
-    return { x: first.x + (second.x - first.x) * amount, y: first.y + (second.y - first.y) * amount };
-  }
-  const latest = samples.at(-1);
-  if (!latest.moving) return { x: latest.x, y: latest.y };
-  const extra = Math.max(0, Math.min(REMOTE_EXTRAPOLATION_MS, renderTime - latest.time)) / 1000;
-  return { x: latest.x + latest.vx * extra, y: latest.y + latest.vy * extra };
-}
-function smoothedPlayers(now) {
   const players = state.players.map(player => {
     const playerKey = `p${player.id}`;
-    const point = player.id === myId && predictedSelf && player.ready ? predictedSelf : sampledMotionPoint(playerKey, now, player.x, player.y);
+    const point = player.id === myId && predictedSelf && player.ready ? predictedSelf : smoothPoint(playerKey, player.x, player.y);
+    if (point !== predictedSelf) seen.add(playerKey);
     const minions = (player.minions || []).map(minion => {
-      const key = `m${player.id}:${minion.id}`, minionPoint = sampledMotionPoint(key, now, minion.x, minion.y);
+      const key = `m${player.id}:${minion.id}`, minionPoint = smoothPoint(key, minion.x, minion.y); seen.add(key);
       return { ...minion, x: minionPoint.x, y: minionPoint.y };
     });
     return { ...player, x: point.x, y: point.y, minions };
   });
+  for (const key of smoothPositions.keys()) if (!seen.has(key)) smoothPositions.delete(key);
   return players;
 }
 function drawGrid() {
@@ -500,12 +418,12 @@ function extrapolatedBulletPosition(bullet, seconds) {
 function drawProjectiles(now) {
   const extrapolation = Math.min(Math.max(0, now - stateReceivedAt) / 1000, .06);
   for (const l of state.lasers || []) { let laserX1 = l.x1, laserY1 = l.y1; if (l.owner === myId && l.segment === 0 && predictedSelf && (l.age || 0) < .18) { const blend = 1 - (l.age || 0) / .18; laserX1 += (predictedSelf.x - l.x1) * blend; laserY1 += (predictedSelf.y - l.y1) * blend; } if (!visible(Math.min(laserX1, l.x2), Math.min(laserY1, l.y2), Math.abs(l.x2 - laserX1), Math.abs(l.y2 - laserY1))) continue; ctx.save(); ctx.strokeStyle = l.color; ctx.shadowColor = l.color; ctx.shadowBlur = mobileMode ? 8 : l.beam ? 17 : 25; ctx.lineWidth = l.beam ? 7 : 11; ctx.globalAlpha = l.beam ? .18 : .25; ctx.beginPath(); ctx.moveTo(laserX1 - camera.x, laserY1 - camera.y); ctx.lineTo(l.x2 - camera.x, l.y2 - camera.y); ctx.stroke(); ctx.lineWidth = l.beam ? 2.5 : 4; ctx.globalAlpha = 1; ctx.beginPath(); ctx.moveTo(laserX1 - camera.x, laserY1 - camera.y); ctx.lineTo(l.x2 - camera.x, l.y2 - camera.y); ctx.stroke(); ctx.restore(); }
-  for (const b of state.bullets || []) { let bulletPoint; if (b.owner === myId) { let visualBullet = b; if (predictedSelf && (b.age || 0) < .18) { const serverMe = state.players.find(player => player.id === myId), blend = 1 - (b.age || 0) / .18; if (serverMe) visualBullet = { ...b, x: b.x + (predictedSelf.x - serverMe.x) * blend, y: b.y + (predictedSelf.y - serverMe.y) * blend }; } bulletPoint = extrapolatedBulletPosition(visualBullet, extrapolation); } else { bulletPoint = sampledMotionPoint(`b${b.id}`, now, b.x, b.y); } const bulletX = bulletPoint.x, bulletY = bulletPoint.y; if (!visible(bulletX, bulletY)) continue; const radius = b.radius || 6; ctx.fillStyle = b.color; ctx.shadowBlur = mobileMode ? 7 : b.kind === "cannon" ? 28 : 16; ctx.shadowColor = b.color; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, radius, 0, Math.PI * 2); ctx.fill(); if (b.kind === "cannon") { ctx.strokeStyle = "#ffe2a8"; ctx.lineWidth = 4; ctx.stroke(); } else if (b.kind === "mage") { ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke(); } else if (b.kind === "sniper") { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, 2, 0, Math.PI * 2); ctx.fill(); } else if (b.bounces > 0) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); } } ctx.shadowBlur = 0;
+  for (const b of state.bullets || []) { let visualBullet = b; if (b.owner === myId && predictedSelf && (b.age || 0) < .18) { const serverMe = state.players.find(player => player.id === myId), blend = 1 - (b.age || 0) / .18; if (serverMe) visualBullet = { ...b, x: b.x + (predictedSelf.x - serverMe.x) * blend, y: b.y + (predictedSelf.y - serverMe.y) * blend }; } const predicted = extrapolatedBulletPosition(visualBullet, extrapolation), bulletX = predicted.x, bulletY = predicted.y; if (!visible(bulletX, bulletY)) continue; const radius = b.radius || 6; ctx.fillStyle = b.color; ctx.shadowBlur = mobileMode ? 7 : b.kind === "cannon" ? 28 : 16; ctx.shadowColor = b.color; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, radius, 0, Math.PI * 2); ctx.fill(); if (b.kind === "cannon") { ctx.strokeStyle = "#ffe2a8"; ctx.lineWidth = 4; ctx.stroke(); } else if (b.kind === "mage") { ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke(); } else if (b.kind === "sniper") { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, 2, 0, Math.PI * 2); ctx.fill(); } else if (b.bounces > 0) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); } } ctx.shadowBlur = 0;
   for (const blast of state.explosions || []) { if (!visible(blast.x, blast.y, 0, 0, blast.radius)) continue; const total = blast.magic ? .25 : .35, alpha = Math.max(0, blast.life / total), radius = blast.radius * (1 - alpha * .45); ctx.save(); ctx.globalAlpha = alpha; ctx.fillStyle = `${blast.color}44`; ctx.strokeStyle = blast.magic ? "#f6e8ff" : blast.color; ctx.lineWidth = blast.magic ? 4 : 7; ctx.shadowBlur = mobileMode ? 10 : 30; ctx.shadowColor = blast.color; ctx.beginPath(); ctx.arc(blast.x - camera.x, blast.y - camera.y, radius, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore(); }
 }
 function render(now) {
   updateLocalPrediction(now); updateLatency(now);
-  const displayPlayers = smoothedPlayers(now), me = displayPlayers.find(player => player.id === myId);
+  const displayPlayers = smoothedPlayers(), me = displayPlayers.find(player => player.id === myId);
   if (me) { camera.x += (me.x - sceneWidth / 2 - camera.x) * .12; camera.y += (me.y - sceneHeight / 2 - camera.y) * .12; camera.x = Math.max(0, Math.min(world.width - sceneWidth, camera.x)); camera.y = Math.max(0, Math.min(world.height - sceneHeight, camera.y)); }
   ctx.save(); ctx.scale(viewScale, viewScale);
   drawGrid(); (state.pickups || []).forEach(p => drawPickup(p, now)); (state.obstacles || []).forEach(drawObstacle); drawSpeedTrails(); drawProjectiles(now); drawMinions(displayPlayers); displayPlayers.forEach(drawPlayer);

@@ -1,0 +1,5 @@
+backend/**/__pycache__/
+backend/.pytest_cache/
+frontend/dist/
+frontend/node_modules/
+.tools/

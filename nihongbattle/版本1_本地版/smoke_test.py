@@ -6,7 +6,7 @@ import uuid
 
 import aiohttp
 
-from server import COLORS, Room, finite_number, ray_rect_hit
+from server import COLORS, Room, ray_rect_hit
 
 
 async def main():
@@ -64,24 +64,12 @@ async def main():
     assert unit_room.advance_bullet(wall_bounce, 0.2) and wall_bounce["vx"] == -100, "子弹障碍物反弹错误"
     wall_shot = {"x": 225, "y": 170, "vx": 760, "vy": 0, "radius": 6, "bounces": 0}
     assert not unit_room.advance_bullet(wall_shot, 0.1), "贴墙射击穿过了障碍物"
-    assert finite_number("bad", 3) == 3 and finite_number(float("nan"), 4) == 4, "异常输入数字没有安全回退"
+    stopping_player = {"x": 225, "y": 170}
+    unit_room.settle_player_stop(stopping_player, 270, 170)
+    assert stopping_player["x"] == 225, "停止位置对齐把玩家推进了墙体"
+    unit_room.settle_player_stop(stopping_player, 400, 170)
+    assert stopping_player["x"] == 225, "停止位置对齐接受了过远坐标"
     unit_room.task.cancel()
-
-    motion_room = Room("MOTION_UNIT")
-    motion_now = time.monotonic()
-    motion_player = {"id": "motion", "name": "移动", "x": 100, "y": 100, "hp": 100, "max_hp": 100,
-                     "score": 0, "color": "#fff", "last_shot": 0, "respawn": 0, "effects": {},
-                     "minions": [], "role": None, "ready": True, "next_weapon": 0,
-                     "ability_ready": 0, "master_weapon": None, "last_input": motion_now,
-                     "input": {"up": False, "down": False, "left": False, "right": False,
-                               "move_x": 0.5, "move_y": 0, "shoot": False, "ability": False, "angle": 0}}
-    motion_room.players = {"motion": motion_player}
-    motion_room.update(0.1, motion_now)
-    assert abs(motion_player["x"] - 115) < 0.01, "模拟摇杆力度被错误转换成满速"
-    motion_player["last_input"], before_timeout = motion_now - 1, motion_player["x"]
-    motion_room.update(0.1, motion_now)
-    assert motion_player["x"] == before_timeout and motion_player["input"]["move_x"] == 0, "输入超时后玩家仍在移动"
-    motion_room.task.cancel()
 
     class_room = Room("CLASS_UNIT", "profession")
     class_player = {"id": "class", "name": "职业", "x": 100, "y": 100, "hp": 100, "max_hp": 100,
@@ -120,9 +108,6 @@ async def main():
     class_room.task.cancel()
     base_url = f"http://127.0.0.1:{os.environ.get('TEST_PORT', '8080')}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"{base_url}/health") as response:
-            health = await response.json()
-            assert health == {"game": "neon-brawl", "edition": "internet", "status": "ok", "protocol": 13}, "互联网版健康检查标识错误"
         async with session.get(f"{base_url}/") as response:
             assert response.status == 200
             page = await response.text()
@@ -130,22 +115,19 @@ async def main():
             assert 'data-role="weaponmaster"' in page and 'data-role="paladin"' in page and 'id="skillButton"' in page, "新职业界面未加载"
             assert 'id="joystick"' in page and 'id="aimJoystick"' in page, "手机双轮盘界面未加载"
             assert 'id="chatToggle"' in page and 'id="chatPanel"' in page and 'id="chatForm"' in page, "折叠聊天界面未加载"
-        async with session.get(f"{base_url}/static/game.js?v=31") as response:
+        async with session.get(f"{base_url}/static/game.js?v=27") as response:
             mobile_script = await response.text()
             assert "visualViewport" in mobile_script and "viewWidth" in mobile_script and "orientationchange" in mobile_script, "动态横屏适配脚本未加载"
-            assert "viewScale" in mobile_script and "motionTracks" in mobile_script and "function visible" in mobile_script, "移动端视野或性能优化未加载"
+            assert "viewScale" in mobile_script and "smoothPositions" in mobile_script and "function visible" in mobile_script, "移动端视野或性能优化未加载"
             assert "touchMove" in mobile_script and "touchAim" in mobile_script and 'aimJoystick.addEventListener("pointerdown"' in mobile_script, "双轮盘输入脚本未加载"
-            assert "KEY_CODES" in mobile_script and "sendInput(performance.now(), true)" in mobile_script, "公网键盘兼容输入脚本未加载"
+            assert "KEY_CODES" in mobile_script and "sendInput(performance.now(), true)" in mobile_script, "键盘兼容输入脚本未加载"
             assert "appendChatMessage" in mobile_script and "message.textContent" in mobile_script and "stopGameInput" in mobile_script, "安全聊天或输入隔离脚本未加载"
             assert "new Map(data.destroyed" in mobile_script, "增量地形同步脚本未加载"
             assert "updateLocalPrediction" in mobile_script and "reconcilePrediction" in mobile_script and "updateLatency" in mobile_script, "本机移动预测或延迟检测脚本未加载"
-            assert "lastStopSequence" in mobile_script and "inputSequence" in mobile_script, "停止输入确认脚本未加载"
+            assert "beginPredictionHold" in mobile_script and "predictionHoldUntil" in mobile_script, "停止移动防抖校正脚本未加载"
             assert "stateReceivedAt" in mobile_script and "bulletX" in mobile_script and "drawProjectiles(now)" in mobile_script, "子弹帧间预测脚本未加载"
-            assert "REMOTE_INTERPOLATION_MS" in mobile_script and "synchronizedSnapshotTime" in mobile_script and "sampledMotionPoint" in mobile_script, "远端实体时间轴插值未加载"
             assert "extrapolatedBulletPosition" in mobile_script, "子弹预测缺少墙体碰撞限制"
-            assert all(marker in mobile_script for marker in ("visualBullet", "aimOrigin", "move_x", "input_seq", "baseLead", "perpendicular", "ws.bufferedAmount")), "移动、停止确认、瞄准或匀速校正优化未加载"
-            assert "stop_x" not in mobile_script and "predictionHoldUntil" not in mobile_script, "旧的停止补位逻辑仍在客户端"
-            assert "event.repeat" in mobile_script and "visibilitychange" in mobile_script, "卡键和页面后台输入保护未加载"
+            assert all(marker in mobile_script for marker in ("visualBullet", "aimOrigin", "move_x", "stop_x", "baseLead", "serverMoving", "ws.bufferedAmount")), "移动、停止对齐、瞄准或枪口显示优化未加载"
 
         first = await session.ws_connect(f"{base_url}/ws")
         second = await session.ws_connect(f"{base_url}/ws")
@@ -154,7 +136,7 @@ async def main():
         first_welcome = json.loads((await first.receive()).data)
         second_welcome = json.loads((await second.receive()).data)
         assert first_welcome["room"] == run_id and second_welcome["room"] == run_id
-        assert first_welcome["protocol"] == 13 and first_welcome["edition"] == "internet" and len(first_welcome["obstacles"]) > 8, "初始地形或压缩协议未发送"
+        assert first_welcome["protocol"] == 10 and first_welcome["edition"] == "local" and len(first_welcome["obstacles"]) > 8, "初始地形或压缩协议未发送"
         for _ in range(10):
             state = json.loads((await first.receive()).data)
             if state.get("type") == "state" and len(state["players"]) == 2:
@@ -162,7 +144,6 @@ async def main():
         else:
             raise AssertionError("两个客户端未收到同一房间的状态")
         assert len(state["pickups"]) == len(state["players"]) == 2, "道具数量没有跟随在线人数"
-        assert isinstance(state.get("server_time"), (int, float)), "状态帧缺少服务器时间戳"
         assert all(pickup["kind"] in {"damage", "rapid", "multishot", "laser", "shield", "speed", "beam", "health", "ricochet", "cannon", "minion"}
                    for pickup in state["pickups"]), "出现未知道具"
         assert "obstacles" not in state and state.get("destroyed") == [], "状态帧仍在重复发送完整地形"
@@ -173,7 +154,7 @@ async def main():
             if pong.get("type") == "pong":
                 break
         else:
-            raise AssertionError("公网延迟检测没有收到响应")
+            raise AssertionError("延迟检测没有收到响应")
         assert pong["sent"] == 123.5, "延迟检测时间戳错误"
         await first.send_json({"type": "chat", "message": "  大家   好  "})
         for _ in range(20):
@@ -184,7 +165,7 @@ async def main():
             raise AssertionError("房间聊天消息未同步")
         assert chat["name"] == "A" and chat["message"] == "大家 好" and chat["color"], "聊天内容清理或玩家信息错误"
         before = next(p["x"] for p in state["players"] if p["name"] == "A")
-        await first.send_json({"type": "input", "seq": 40, "right": True, "move_x": 0.5, "move_y": 0, "angle": 0})
+        await first.send_json({"type": "input", "right": True, "move_x": 0.5, "move_y": 0, "angle": 0})
         moved = False
         for _ in range(20):
             state = json.loads((await first.receive()).data)
@@ -193,27 +174,16 @@ async def main():
                 moved = True
                 break
         assert moved, "服务端没有处理移动输入"
-        await first.send_json({"type": "input", "seq": 41, "move_x": 0, "move_y": 0, "angle": 0})
+        stop_target = player["x"]
+        await first.send_json({"type": "input", "move_x": 0, "move_y": 0, "stop_x": stop_target, "stop_y": player["y"], "angle": 0})
         for _ in range(10):
             stopped_state = json.loads((await first.receive()).data)
             stopped_player = next((p for p in stopped_state.get("players", []) if p["name"] == "A"), None)
-            if stopped_player and stopped_player["move_x"] == stopped_player["move_y"] == 0 and stopped_player["input_seq"] == 41:
+            if stopped_player and stopped_player["move_x"] == stopped_player["move_y"] == 0:
                 break
         else:
             raise AssertionError("服务器没有确认停止移动")
-        stopped_x = stopped_player["x"]
-        await first.send_json({"type": "input", "seq": 40, "move_x": 1, "move_y": 0, "angle": 0})
-        for _ in range(3):
-            stale_state = json.loads((await first.receive()).data)
-            if stale_state.get("type") == "state":
-                stale_player = next(p for p in stale_state["players"] if p["name"] == "A")
-        assert stale_player["input_seq"] == 41 and abs(stale_player["x"] - stopped_x) < 0.2, "过期移动输入导致停止后继续位移"
-        await first.send_json({"type": "input", "seq": 42, "move_x": "bad", "move_y": None, "angle": "bad"})
-        for _ in range(5):
-            safe_state = json.loads((await first.receive()).data)
-            if safe_state.get("type") == "state":
-                break
-        assert safe_state["type"] == "state", "异常输入导致连接断开"
+        assert abs(stopped_player["x"] - stop_target) < 0.2, "服务器没有对齐客户端停止位置"
         player_color = player["color"]
         owned_bullet = None
         for angle in (0, 1.57, 3.14, -1.57):
@@ -227,7 +197,7 @@ async def main():
                 break
         else:
             raise AssertionError("射击后未生成玩家颜色的子弹")
-        assert all(key in owned_bullet for key in ("id", "vx", "vy", "owner", "age")), "子弹稳定标识、速度、发射者或弹龄没有同步到客户端"
+        assert all(key in owned_bullet for key in ("vx", "vy", "owner", "age")), "子弹速度、发射者或弹龄没有同步到客户端"
         await second.close()
         for _ in range(20):
             state = json.loads((await first.receive()).data)
@@ -257,7 +227,7 @@ async def main():
         profession = await session.ws_connect(f"{base_url}/ws")
         await profession.send_json({"name": "职业测试", "room": f"R{run_id}", "mode": "profession"})
         profession_welcome = json.loads((await profession.receive()).data)
-        assert profession_welcome["mode"] == "profession" and profession_welcome["protocol"] == 13
+        assert profession_welcome["mode"] == "profession" and profession_welcome["protocol"] == 10
         waiting = json.loads((await profession.receive()).data)
         pro_player = waiting["players"][0]
         assert not pro_player["ready"] and len(waiting["pickups"]) == 1 and waiting["pickups"][0]["kind"] == "health", "职业选择前状态或血包规则错误"

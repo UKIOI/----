@@ -1,4 +1,5 @@
 import asyncio
+import heapq
 import json
 import math
 import os
@@ -24,6 +25,13 @@ POWERUP_DURATION = 10.0
 POWERUP_TYPES = ("damage", "rapid", "multishot", "laser", "shield", "speed", "beam", "health",
                  "ricochet", "cannon", "minion")
 WEAPON_MASTER_WEAPONS = ("multishot", "laser", "beam", "ricochet", "cannon")
+BOT_DIFFICULTIES = {
+    "easy": {"reaction": 0.48, "aim_error": 0.24, "speed": 0.72, "fire_chance": 0.55, "preferred": 390},
+    "normal": {"reaction": 0.24, "aim_error": 0.10, "speed": 0.88, "fire_chance": 0.82, "preferred": 340},
+    "hard": {"reaction": 0.11, "aim_error": 0.035, "speed": 1.0, "fire_chance": 0.97, "preferred": 300},
+}
+BOT_ROLES = ("tank", "mage", "sniper", "necromancer", "weaponmaster", "paladin")
+NAV_CELL = 50
 OBSTACLES = [
     {"x": 250, "y": 150, "w": 260, "h": 55},
     {"x": 1090, "y": 150, "w": 260, "h": 55},
@@ -104,6 +112,7 @@ class Room:
         self.terrain = build_terrain()
         self.next_pickup_id = 0
         self.next_minion_id = 0
+        self.bot_difficulty = "normal"
         self.last = time.monotonic()
         self.last_broadcast = 0
         self.task = asyncio.create_task(self.loop())
@@ -147,6 +156,258 @@ class Room:
     def next_player_color(self):
         used = {player["color"] for player in self.players.values()}
         return next((color for color in COLORS if color not in used), COLORS[len(self.players) % len(COLORS)])
+
+    def bots(self):
+        return [player for player in self.players.values() if player.get("is_bot")]
+
+    def humans(self):
+        return [player for player in self.players.values() if not player.get("is_bot")]
+
+    def configure_bots(self, count, difficulty):
+        difficulty = difficulty if difficulty in BOT_DIFFICULTIES else "normal"
+        self.bot_difficulty = difficulty
+        removed_ids = {pid for pid, player in self.players.items() if player.get("is_bot")}
+        for pid in removed_ids:
+            self.players.pop(pid, None)
+        self.bullets = [bullet for bullet in self.bullets if bullet["owner"] not in removed_ids]
+        self.lasers = [laser for laser in self.lasers if laser["owner"] not in removed_ids]
+        try:
+            count = int(count)
+        except (TypeError, ValueError, OverflowError):
+            count = 0
+        count = max(0, min(count, 12 - len(self.humans())))
+        for index in range(count):
+            pid = f"bot-{secrets.token_hex(4)}"
+            ready = self.mode != "profession"
+            bot = {"id": pid, "name": f"人机 {index + 1}", "x": 0, "y": 0,
+                   "hp": 0, "max_hp": 100, "score": 0, "color": self.next_player_color(),
+                   "ws": None, "is_bot": True, "difficulty": difficulty, "last_shot": 0,
+                   "respawn": 0, "effects": {}, "minions": [], "role": None, "ready": ready,
+                   "next_weapon": 0, "ability_ready": 0, "master_weapon": None, "last_chat": 0,
+                   "bot_next_think": 0, "bot_strafe": random.choice((-1, 1)),
+                   "input": {"up": False, "down": False, "left": False, "right": False,
+                             "move_x": 0, "move_y": 0, "shoot": False, "ability": False, "angle": 0}}
+            self.players[pid] = bot
+            if ready:
+                self.spawn(bot)
+            else:
+                self.select_role(bot, random.choice(BOT_ROLES), time.monotonic())
+        self.sync_pickups()
+
+    def path_clear(self, start_x, start_y, end_x, end_y, radius=PLAYER_RADIUS + 2):
+        distance = math.hypot(end_x - start_x, end_y - start_y)
+        steps = max(1, math.ceil(distance / 20))
+        terrain = list(self.active_terrain())
+        for step in range(1, steps + 1):
+            ratio = step / steps
+            x = start_x + (end_x - start_x) * ratio
+            y = start_y + (end_y - start_y) * ratio
+            if any(circle_hits_rect(x, y, radius, obstacle) for obstacle in terrain):
+                return False
+        return True
+
+    def navigation_direction(self, start_x, start_y, goal_x, goal_y):
+        direct_x, direct_y = goal_x - start_x, goal_y - start_y
+        direct_length = math.hypot(direct_x, direct_y)
+        if direct_length < 4:
+            return 0, 0
+        if self.path_clear(start_x, start_y, goal_x, goal_y):
+            return direct_x / direct_length, direct_y / direct_length
+
+        columns, rows = math.ceil(WIDTH / NAV_CELL), math.ceil(HEIGHT / NAV_CELL)
+        terrain = list(self.active_terrain())
+        open_cache = {}
+
+        def cell_center(cell):
+            column, row = cell
+            return min(WIDTH - PLAYER_RADIUS, column * NAV_CELL + NAV_CELL / 2), min(
+                HEIGHT - PLAYER_RADIUS, row * NAV_CELL + NAV_CELL / 2)
+
+        def walkable(cell):
+            if cell in open_cache:
+                return open_cache[cell]
+            column, row = cell
+            if not (0 <= column < columns and 0 <= row < rows):
+                return False
+            x, y = cell_center(cell)
+            result = not any(circle_hits_rect(x, y, PLAYER_RADIUS + 3, obstacle) for obstacle in terrain)
+            open_cache[cell] = result
+            return result
+
+        def nearest_open(x, y):
+            origin = (int(clamp(x // NAV_CELL, 0, columns - 1)), int(clamp(y // NAV_CELL, 0, rows - 1)))
+            if walkable(origin):
+                return origin
+            for radius in range(1, 6):
+                candidates = []
+                for offset_x in range(-radius, radius + 1):
+                    for offset_y in (-radius, radius):
+                        candidates.append((origin[0] + offset_x, origin[1] + offset_y))
+                for offset_y in range(-radius + 1, radius):
+                    for offset_x in (-radius, radius):
+                        candidates.append((origin[0] + offset_x, origin[1] + offset_y))
+                valid = [cell for cell in candidates if walkable(cell)]
+                if valid:
+                    return min(valid, key=lambda cell: math.hypot(cell_center(cell)[0] - x,
+                                                                  cell_center(cell)[1] - y))
+            return None
+
+        start, goal = nearest_open(start_x, start_y), nearest_open(goal_x, goal_y)
+        if start is None or goal is None:
+            return direct_x / direct_length, direct_y / direct_length
+        frontier = [(0, start)]
+        came_from, cost = {start: None}, {start: 0}
+        while frontier:
+            _, current = heapq.heappop(frontier)
+            if current == goal:
+                break
+            for offset_x, offset_y in ((1, 0), (-1, 0), (0, 1), (0, -1),
+                                       (1, 1), (1, -1), (-1, 1), (-1, -1)):
+                neighbour = (current[0] + offset_x, current[1] + offset_y)
+                if not walkable(neighbour):
+                    continue
+                if offset_x and offset_y and (not walkable((current[0] + offset_x, current[1])) or
+                                              not walkable((current[0], current[1] + offset_y))):
+                    continue
+                new_cost = cost[current] + (1.414 if offset_x and offset_y else 1)
+                if new_cost >= cost.get(neighbour, math.inf):
+                    continue
+                cost[neighbour], came_from[neighbour] = new_cost, current
+                priority = new_cost + math.hypot(goal[0] - neighbour[0], goal[1] - neighbour[1])
+                heapq.heappush(frontier, (priority, neighbour))
+        if goal not in came_from:
+            return direct_x / direct_length, direct_y / direct_length
+        path, current = [], goal
+        while current is not None:
+            path.append(current)
+            current = came_from[current]
+        path.reverse()
+        waypoint_x, waypoint_y = cell_center(path[min(1, len(path) - 1)])
+        for cell in path[2:7]:
+            candidate_x, candidate_y = cell_center(cell)
+            if not self.path_clear(start_x, start_y, candidate_x, candidate_y):
+                break
+            waypoint_x, waypoint_y = candidate_x, candidate_y
+        move_x, move_y = waypoint_x - start_x, waypoint_y - start_y
+        move_length = math.hypot(move_x, move_y) or 1
+        return move_x / move_length, move_y / move_length
+
+    def safest_position(self, bot, enemies):
+        best = (bot["x"], bot["y"])
+        best_score = -math.inf
+        for distance in (280, 480, 680):
+            for index in range(16):
+                angle = index * math.tau / 16
+                x = clamp(bot["x"] + math.cos(angle) * distance, PLAYER_RADIUS, WIDTH - PLAYER_RADIUS)
+                y = clamp(bot["y"] + math.sin(angle) * distance, PLAYER_RADIUS, HEIGHT - PLAYER_RADIUS)
+                if any(circle_hits_rect(x, y, PLAYER_RADIUS + 3, obstacle) for obstacle in self.active_terrain()):
+                    continue
+                enemy_distance = min(math.hypot(enemy["x"] - x, enemy["y"] - y) for enemy in enemies)
+                travel = math.hypot(x - bot["x"], y - bot["y"])
+                score = enemy_distance - travel * 0.12
+                if score > best_score:
+                    best, best_score = (x, y), score
+        return best
+
+    def dodge_direction(self, bot):
+        dodge_x = dodge_y = 0
+        for bullet in self.bullets:
+            if bullet["owner"] == bot["id"]:
+                continue
+            speed = math.hypot(bullet["vx"], bullet["vy"])
+            if speed < 1:
+                continue
+            velocity_x, velocity_y = bullet["vx"] / speed, bullet["vy"] / speed
+            relative_x, relative_y = bot["x"] - bullet["x"], bot["y"] - bullet["y"]
+            along = relative_x * velocity_x + relative_y * velocity_y
+            if not 0 < along < speed * 0.55:
+                continue
+            closest_x = bullet["x"] + velocity_x * along
+            closest_y = bullet["y"] + velocity_y * along
+            miss_x, miss_y = bot["x"] - closest_x, bot["y"] - closest_y
+            miss = math.hypot(miss_x, miss_y)
+            if miss >= PLAYER_RADIUS + bullet.get("radius", 6) + 28:
+                continue
+            side = 1 if velocity_x * relative_y - velocity_y * relative_x >= 0 else -1
+            urgency = 1 - along / (speed * 0.55)
+            dodge_x += -velocity_y * side * (0.6 + urgency)
+            dodge_y += velocity_x * side * (0.6 + urgency)
+        length = math.hypot(dodge_x, dodge_y)
+        return (dodge_x / length, dodge_y / length) if length else None
+
+    def update_bots(self, now):
+        for bot in self.bots():
+            if self.mode == "profession" and not bot["ready"]:
+                if now >= bot.get("respawn", 0):
+                    self.select_role(bot, random.choice(BOT_ROLES), now)
+                else:
+                    continue
+            if not bot["ready"] or bot["hp"] <= 0 or now < bot.get("bot_next_think", 0):
+                continue
+            settings = BOT_DIFFICULTIES[bot.get("difficulty", self.bot_difficulty)]
+            bot["bot_next_think"] = now + settings["reaction"] * random.uniform(0.82, 1.18)
+            enemies = [player for player in self.players.values()
+                       if player["id"] != bot["id"] and player["ready"] and player["hp"] > 0]
+            if not enemies:
+                bot["input"].update(move_x=0, move_y=0, shoot=False, ability=False)
+                continue
+            target = min(enemies, key=lambda player: math.hypot(player["x"] - bot["x"], player["y"] - bot["y"]))
+            dx, dy = target["x"] - bot["x"], target["y"] - bot["y"]
+            distance = max(1, math.hypot(dx, dy))
+            toward_x, toward_y = dx / distance, dy / distance
+            low_health = bot["hp"] <= bot.get("max_hp", 100) * 0.35
+            health_pickups = [pickup for pickup in self.pickups if pickup["active"] and pickup["kind"] == "health"]
+            pickup_range = {"easy": 430, "normal": 650, "hard": 900}[bot.get("difficulty", self.bot_difficulty)]
+            useful_pickups = [pickup for pickup in self.pickups if pickup["active"] and
+                              math.hypot(pickup["x"] - bot["x"], pickup["y"] - bot["y"]) <= pickup_range]
+            dodge = self.dodge_direction(bot)
+            if dodge:
+                move_x, move_y = dodge
+                bot["bot_goal_kind"] = "dodge"
+            elif low_health and distance < 360:
+                safe_x, safe_y = self.safest_position(bot, enemies)
+                move_x, move_y = self.navigation_direction(bot["x"], bot["y"], safe_x, safe_y)
+                bot["bot_goal_kind"] = "retreat"
+            elif low_health and health_pickups:
+                pickup = min(health_pickups, key=lambda item: math.hypot(item["x"] - bot["x"], item["y"] - bot["y"]))
+                move_x, move_y = self.navigation_direction(bot["x"], bot["y"], pickup["x"], pickup["y"])
+                bot["bot_goal_kind"] = "health"
+            elif low_health:
+                safe_x, safe_y = self.safest_position(bot, enemies)
+                move_x, move_y = self.navigation_direction(bot["x"], bot["y"], safe_x, safe_y)
+                bot["bot_goal_kind"] = "retreat"
+            elif useful_pickups:
+                pickup_values = {"health": 5 if bot["hp"] < bot.get("max_hp", 100) else 0,
+                                 "shield": 4, "speed": 3.5, "cannon": 3.2, "laser": 3.2,
+                                 "beam": 3, "damage": 2.8, "rapid": 2.7, "multishot": 2.7,
+                                 "ricochet": 2.4, "minion": 3.4}
+                pickup = max(useful_pickups, key=lambda item: pickup_values.get(item["kind"], 2) * 180 -
+                             math.hypot(item["x"] - bot["x"], item["y"] - bot["y"]))
+                move_x, move_y = self.navigation_direction(bot["x"], bot["y"], pickup["x"], pickup["y"])
+                bot["bot_goal_kind"] = "pickup"
+            elif distance > settings["preferred"] + 70:
+                move_x, move_y = self.navigation_direction(bot["x"], bot["y"], target["x"], target["y"])
+                bot["bot_goal_kind"] = "chase"
+            elif distance < settings["preferred"] - 80:
+                retreat_x = clamp(bot["x"] - toward_x * 260, PLAYER_RADIUS, WIDTH - PLAYER_RADIUS)
+                retreat_y = clamp(bot["y"] - toward_y * 260, PLAYER_RADIUS, HEIGHT - PLAYER_RADIUS)
+                move_x, move_y = self.navigation_direction(bot["x"], bot["y"], retreat_x, retreat_y)
+                bot["bot_goal_kind"] = "space"
+            else:
+                strafe_x = clamp(bot["x"] - toward_y * bot["bot_strafe"] * 220, PLAYER_RADIUS, WIDTH - PLAYER_RADIUS)
+                strafe_y = clamp(bot["y"] + toward_x * bot["bot_strafe"] * 220, PLAYER_RADIUS, HEIGHT - PLAYER_RADIUS)
+                move_x, move_y = self.navigation_direction(bot["x"], bot["y"], strafe_x, strafe_y)
+                bot["bot_goal_kind"] = "strafe"
+                if random.random() < 0.16:
+                    bot["bot_strafe"] *= -1
+            move_length = math.hypot(move_x, move_y)
+            if move_length > 1:
+                move_x, move_y = move_x / move_length, move_y / move_length
+            aim = math.atan2(dy, dx) + random.uniform(-settings["aim_error"], settings["aim_error"])
+            bot["input"].update(move_x=move_x, move_y=move_y, angle=aim,
+                                shoot=distance < 720 and (not low_health or random.random() < 0.45) and
+                                random.random() < settings["fire_chance"],
+                                ability=bot.get("role") == "paladin" and distance < 520 and bot["hp"] < 75)
 
     def spawn(self, player):
         x, y = self.random_open_position(PLAYER_RADIUS + 15)
@@ -388,6 +649,7 @@ class Room:
 
     def update(self, dt, now):
         self.restore_terrain(now)
+        self.update_bots(now)
         for p in self.players.values():
             if not p["ready"]:
                 continue
@@ -404,6 +666,8 @@ class Room:
             if length > 1:
                 dx, dy = dx / length, dy / length
             speed = PLAYER_SPEED * (1.45 if p["effects"].get("speed", 0) > now else 1)
+            if p.get("is_bot"):
+                speed *= BOT_DIFFICULTIES[p.get("difficulty", self.bot_difficulty)]["speed"]
             self.move_player(p, dx * speed * dt, dy * speed * dt)
             rapid = p["effects"].get("rapid", 0) > now
             cannon = p["effects"].get("cannon", 0) > now
@@ -514,6 +778,7 @@ class Room:
         now = time.monotonic()
         payload = json.dumps({"type": "state", "players": [
             {**{k: p[k] for k in ("id", "name", "max_hp", "score", "color", "role", "ready")},
+             "bot": p.get("is_bot", False),
              "x": round(p["x"], 1), "y": round(p["y"], 1), "hp": round(p["hp"], 1),
              "input_seq": p.get("input_seq", -1),
              "move_x": round(p["input"].get("move_x", 0), 3), "move_y": round(p["input"].get("move_y", 0), 3),
@@ -534,10 +799,11 @@ class Room:
            "explosions": [{k: round(value, 1) if k in {"x", "y", "radius", "life"} else value
                             for k, value in explosion.items()} for explosion in self.explosions],
            "pickups": [p for p in self.pickups if p["active"]],
+           "bot_count": len(self.bots()), "bot_difficulty": self.bot_difficulty,
            "destroyed": [[block["id"], max(0, round(block["restore"] - now, 1))]
                          for block in self.terrain if not block["active"]]},
                          ensure_ascii=False, separators=(",", ":"))
-        members = list(self.players.items())
+        members = [(pid, player) for pid, player in self.players.items() if not player.get("is_bot")]
         results = await asyncio.gather(*(player["ws"].send_str(payload) for _, player in members),
                                        return_exceptions=True)
         for (pid, _), result in zip(members, results):
@@ -547,7 +813,7 @@ class Room:
     async def broadcast_chat(self, player, message):
         payload = {"type": "chat", "player_id": player["id"], "name": player["name"],
                    "color": player["color"], "message": message}
-        await asyncio.gather(*(member["ws"].send_json(payload) for member in self.players.values()),
+        await asyncio.gather(*(member["ws"].send_json(payload) for member in self.humans()),
                              return_exceptions=True)
 
 
@@ -574,13 +840,16 @@ async def websocket(request):
         else:
             room = Room(code, mode)
             rooms[code] = room
+        if len(room.players) >= 12 and room.bots():
+            room.players.pop(room.bots()[-1]["id"], None)
         if len(room.players) >= 12:
             await ws.send_json({"type": "error", "message": "房间已满（最多 12 人）"})
             return ws
         pid = secrets.token_hex(4)
         ready = mode != "profession"
         player = {"id": pid, "name": name, "x": 0, "y": 0,
-                  "hp": 0, "max_hp": 100, "score": 0, "color": room.next_player_color(), "ws": ws, "last_shot": 0,
+                  "hp": 0, "max_hp": 100, "score": 0, "color": room.next_player_color(), "ws": ws,
+                  "is_bot": False, "last_shot": 0,
                   "respawn": 0, "effects": {}, "minions": [], "role": None, "ready": ready,
                   "next_weapon": 0, "ability_ready": 0, "master_weapon": None, "last_chat": 0,
                   "last_input": time.monotonic(), "input_seq": -1,
@@ -635,7 +904,10 @@ async def websocket(request):
                 elif data.get("type") == "ping":
                     await ws.send_json({"type": "pong", "sent": data.get("sent")})
                 elif data.get("type") in {"bots", "configure_bots"}:
-                    await ws.send_json({"type": "error", "code": "offline_only", "message": "当前后端未启用离线人机"})
+                    if os.environ.get("APP_EDITION") != "offline":
+                        await ws.send_json({"type": "error", "code": "offline_only", "message": "当前后端未启用离线人机"})
+                    else:
+                        room.configure_bots(data.get("count", 0), str(data.get("difficulty", "normal")))
                 else:
                     await ws.send_json({"type": "error", "code": "unknown_message", "message": "不支持的消息类型"})
             elif msg.type == WSMsgType.ERROR:
@@ -645,7 +917,7 @@ async def websocket(request):
     finally:
         if room and player:
             room.players.pop(player["id"], None)
-            if not room.players:
+            if not room.humans():
                 rooms.pop(room.code, None)
                 room.task.cancel()
     return ws

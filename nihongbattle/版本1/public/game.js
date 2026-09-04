@@ -28,7 +28,7 @@ const POWERUPS = {
   cannon: { icon: "●", name: "攻城大炮", color: "#ff7b39" }, minion: { icon: "◉", name: "战斗随从", color: "#72f1d0" },
   invincible: { icon: "✧", name: "神圣无敌", color: "#ffe17a" },
 };
-const PROTOCOL_VERSION = 13;
+const PROTOCOL_VERSION = 12;
 let ws, myId = null, requestedMode = "classic", world = { width: 1600, height: 900 };
 let state = { players: [], bullets: [], lasers: [], explosions: [], pickups: [], obstacles: [] };
 let keys = {}, mouse = { x: 0, y: 0, down: false }, touchMove = { x: 0, y: 0 }, touchAim = { x: 1, y: 0, active: false };
@@ -44,10 +44,7 @@ let predictedSelf = null, lastFrame = performance.now(), lastPing = 0, latency =
 let predictionBlocked = false, inputSequence = 0, lastStopSequence = -1, lastSentMoving = false;
 let viewWidth = innerWidth, viewHeight = innerHeight, sceneWidth = innerWidth / viewScale, sceneHeight = innerHeight / viewScale;
 const speedTrails = new Map();
-const motionTracks = new Map();
-const REMOTE_INTERPOLATION_MS = 85;
-const REMOTE_EXTRAPOLATION_MS = 45;
-let serverClockOffset = null;
+const smoothPositions = new Map();
 function resize() {
   const viewport = window.visualViewport;
   const ratio = Math.min(devicePixelRatio || 1, mobileMode ? 1.5 : 2);
@@ -76,15 +73,15 @@ function connect() {
         ws.close();
         return;
       }
-      myId = data.id; world = data; state.obstacles = data.obstacles || []; predictedSelf = null; motionTracks.clear(); serverClockOffset = null; inputSequence = 0; lastStopSequence = -1; lastSentMoving = false; lastPing = 0; menu.hidden = true; game.hidden = false; canvas.tabIndex = 0; canvas.focus();
+      myId = data.id; world = data; state.obstacles = data.obstacles || []; predictedSelf = null; inputSequence = 0; lastStopSequence = -1; lastSentMoving = false; lastPing = 0; menu.hidden = true; game.hidden = false; canvas.tabIndex = 0; canvas.focus();
       document.querySelector("#roomLabel").textContent = `房间 ${data.room} · ${MODE_NAMES[data.mode]}`;
       statusLabel.textContent = data.mode === "profession" ? "请选择职业" : "正在载入战场…";
       rolePanel.hidden = data.mode !== "profession";
     } else if (data.type === "state") {
-      const receivedAt = performance.now(), destroyed = new Map(data.destroyed || []);
+      const destroyed = new Map(data.destroyed || []);
       data.obstacles = (state.obstacles || []).map(obstacle => ({ ...obstacle, active: !destroyed.has(obstacle.id), restore: destroyed.get(obstacle.id) || 0 }));
       reconcilePrediction(data.players.find(player => player.id === myId));
-      recordMotionSnapshots(data, synchronizedSnapshotTime(data.server_time, receivedAt)); recordSpeedTrails(data.players); state = data; stateReceivedAt = receivedAt; receivedState = true; const me = data.players.find(player => player.id === myId);
+      recordSpeedTrails(data.players); state = data; stateReceivedAt = performance.now(); receivedState = true; const me = data.players.find(player => player.id === myId);
       if (requestedMode === "profession") rolePanel.hidden = me?.ready === true;
       const isPaladin = me?.ready && me.role === "paladin";
       skillButton.hidden = !isPaladin;
@@ -321,84 +318,25 @@ function updateLatency(now) {
   if (!ws || ws.readyState !== WebSocket.OPEN || now - lastPing < 2000) return;
   lastPing = now; ws.send(JSON.stringify({ type: "ping", sent: now }));
 }
-function synchronizedSnapshotTime(serverTime, receivedAt) {
-  if (!Number.isFinite(serverTime)) return receivedAt;
-  const measuredOffset = receivedAt - serverTime;
-  if (serverClockOffset === null) serverClockOffset = measuredOffset;
-  else {
-    const difference = measuredOffset - serverClockOffset;
-    // 网络包偶尔晚到时不要把时间轴向后猛拉；更低延迟的样本则较快校准时钟。
-    const adjustment = difference * (difference < 0 ? .2 : .015);
-    serverClockOffset += Math.max(-8, Math.min(2, adjustment));
-  }
-  return serverTime + serverClockOffset;
+function smoothPoint(key, x, y) {
+  let point = smoothPositions.get(key);
+  if (!point || Math.hypot(point.x - x, point.y - y) > 420) point = { x, y };
+  point.x += (x - point.x) * .38; point.y += (y - point.y) * .38;
+  smoothPositions.set(key, point); return point;
 }
-function recordMotionSample(key, x, y, time, vx, vy, moving) {
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-  let track = motionTracks.get(key), samples = track?.samples || [], last = samples.at(-1);
-  if (last && Math.hypot(last.x - x, last.y - y) > 420) { samples = []; last = null; }
-  if (last && time <= last.time) time = last.time + 1;
-  const elapsed = last ? Math.max(.001, (time - last.time) / 1000) : 0;
-  const sampleVx = Number.isFinite(vx) ? vx : last ? (x - last.x) / elapsed : 0;
-  const sampleVy = Number.isFinite(vy) ? vy : last ? (y - last.y) / elapsed : 0;
-  const sampleMoving = typeof moving === "boolean" ? moving : Math.hypot(sampleVx, sampleVy) > 8;
-  const sample = { x, y, time, vx: sampleVx, vy: sampleVy, moving: sampleMoving };
-  if (!samples.length && sampleMoving) {
-    const delay = REMOTE_INTERPOLATION_MS / 1000;
-    samples.push({ ...sample, x: x - sampleVx * delay, y: y - sampleVy * delay, time: time - REMOTE_INTERPOLATION_MS });
-  }
-  samples.push(sample);
-  if (samples.length > 8) samples.splice(0, samples.length - 8);
-  motionTracks.set(key, { samples, lastSeen: time });
-}
-function recordMotionSnapshots(snapshot, receivedAt) {
+function smoothedPlayers() {
   const seen = new Set();
-  for (const player of snapshot.players || []) {
-    if (player.id !== myId) {
-      const key = `p${player.id}`, speed = 300 * (player.effects?.speed ? 1.45 : 1);
-      const moveX = Number(player.move_x) || 0, moveY = Number(player.move_y) || 0;
-      recordMotionSample(key, player.x, player.y, receivedAt, moveX * speed, moveY * speed, Math.hypot(moveX, moveY) > .01);
-      seen.add(key);
-    }
-    for (const minion of player.minions || []) {
-      const key = `m${player.id}:${minion.id}`;
-      recordMotionSample(key, minion.x, minion.y, receivedAt);
-      seen.add(key);
-    }
-  }
-  for (const bullet of snapshot.bullets || []) {
-    if (bullet.owner === myId || bullet.id === undefined) continue;
-    const key = `b${bullet.id}`;
-    recordMotionSample(key, bullet.x, bullet.y, receivedAt, bullet.vx || 0, bullet.vy || 0, true);
-    seen.add(key);
-  }
-  for (const key of motionTracks.keys()) if (!seen.has(key)) motionTracks.delete(key);
-}
-function sampledMotionPoint(key, now, fallbackX, fallbackY) {
-  const track = motionTracks.get(key), samples = track?.samples;
-  if (!samples?.length) return { x: fallbackX, y: fallbackY };
-  const renderTime = now - REMOTE_INTERPOLATION_MS;
-  while (samples.length > 2 && samples[1].time <= renderTime) samples.shift();
-  const first = samples[0], second = samples[1];
-  if (second && renderTime <= second.time) {
-    const span = Math.max(1, second.time - first.time), amount = Math.max(0, Math.min(1, (renderTime - first.time) / span));
-    return { x: first.x + (second.x - first.x) * amount, y: first.y + (second.y - first.y) * amount };
-  }
-  const latest = samples.at(-1);
-  if (!latest.moving) return { x: latest.x, y: latest.y };
-  const extra = Math.max(0, Math.min(REMOTE_EXTRAPOLATION_MS, renderTime - latest.time)) / 1000;
-  return { x: latest.x + latest.vx * extra, y: latest.y + latest.vy * extra };
-}
-function smoothedPlayers(now) {
   const players = state.players.map(player => {
     const playerKey = `p${player.id}`;
-    const point = player.id === myId && predictedSelf && player.ready ? predictedSelf : sampledMotionPoint(playerKey, now, player.x, player.y);
+    const point = player.id === myId && predictedSelf && player.ready ? predictedSelf : smoothPoint(playerKey, player.x, player.y);
+    if (point !== predictedSelf) seen.add(playerKey);
     const minions = (player.minions || []).map(minion => {
-      const key = `m${player.id}:${minion.id}`, minionPoint = sampledMotionPoint(key, now, minion.x, minion.y);
+      const key = `m${player.id}:${minion.id}`, minionPoint = smoothPoint(key, minion.x, minion.y); seen.add(key);
       return { ...minion, x: minionPoint.x, y: minionPoint.y };
     });
     return { ...player, x: point.x, y: point.y, minions };
   });
+  for (const key of smoothPositions.keys()) if (!seen.has(key)) smoothPositions.delete(key);
   return players;
 }
 function drawGrid() {
@@ -500,12 +438,12 @@ function extrapolatedBulletPosition(bullet, seconds) {
 function drawProjectiles(now) {
   const extrapolation = Math.min(Math.max(0, now - stateReceivedAt) / 1000, .06);
   for (const l of state.lasers || []) { let laserX1 = l.x1, laserY1 = l.y1; if (l.owner === myId && l.segment === 0 && predictedSelf && (l.age || 0) < .18) { const blend = 1 - (l.age || 0) / .18; laserX1 += (predictedSelf.x - l.x1) * blend; laserY1 += (predictedSelf.y - l.y1) * blend; } if (!visible(Math.min(laserX1, l.x2), Math.min(laserY1, l.y2), Math.abs(l.x2 - laserX1), Math.abs(l.y2 - laserY1))) continue; ctx.save(); ctx.strokeStyle = l.color; ctx.shadowColor = l.color; ctx.shadowBlur = mobileMode ? 8 : l.beam ? 17 : 25; ctx.lineWidth = l.beam ? 7 : 11; ctx.globalAlpha = l.beam ? .18 : .25; ctx.beginPath(); ctx.moveTo(laserX1 - camera.x, laserY1 - camera.y); ctx.lineTo(l.x2 - camera.x, l.y2 - camera.y); ctx.stroke(); ctx.lineWidth = l.beam ? 2.5 : 4; ctx.globalAlpha = 1; ctx.beginPath(); ctx.moveTo(laserX1 - camera.x, laserY1 - camera.y); ctx.lineTo(l.x2 - camera.x, l.y2 - camera.y); ctx.stroke(); ctx.restore(); }
-  for (const b of state.bullets || []) { let bulletPoint; if (b.owner === myId) { let visualBullet = b; if (predictedSelf && (b.age || 0) < .18) { const serverMe = state.players.find(player => player.id === myId), blend = 1 - (b.age || 0) / .18; if (serverMe) visualBullet = { ...b, x: b.x + (predictedSelf.x - serverMe.x) * blend, y: b.y + (predictedSelf.y - serverMe.y) * blend }; } bulletPoint = extrapolatedBulletPosition(visualBullet, extrapolation); } else { bulletPoint = sampledMotionPoint(`b${b.id}`, now, b.x, b.y); } const bulletX = bulletPoint.x, bulletY = bulletPoint.y; if (!visible(bulletX, bulletY)) continue; const radius = b.radius || 6; ctx.fillStyle = b.color; ctx.shadowBlur = mobileMode ? 7 : b.kind === "cannon" ? 28 : 16; ctx.shadowColor = b.color; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, radius, 0, Math.PI * 2); ctx.fill(); if (b.kind === "cannon") { ctx.strokeStyle = "#ffe2a8"; ctx.lineWidth = 4; ctx.stroke(); } else if (b.kind === "mage") { ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke(); } else if (b.kind === "sniper") { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, 2, 0, Math.PI * 2); ctx.fill(); } else if (b.bounces > 0) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); } } ctx.shadowBlur = 0;
+  for (const b of state.bullets || []) { let visualBullet = b; if (b.owner === myId && predictedSelf && (b.age || 0) < .18) { const serverMe = state.players.find(player => player.id === myId), blend = 1 - (b.age || 0) / .18; if (serverMe) visualBullet = { ...b, x: b.x + (predictedSelf.x - serverMe.x) * blend, y: b.y + (predictedSelf.y - serverMe.y) * blend }; } const predicted = extrapolatedBulletPosition(visualBullet, extrapolation), bulletX = predicted.x, bulletY = predicted.y; if (!visible(bulletX, bulletY)) continue; const radius = b.radius || 6; ctx.fillStyle = b.color; ctx.shadowBlur = mobileMode ? 7 : b.kind === "cannon" ? 28 : 16; ctx.shadowColor = b.color; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, radius, 0, Math.PI * 2); ctx.fill(); if (b.kind === "cannon") { ctx.strokeStyle = "#ffe2a8"; ctx.lineWidth = 4; ctx.stroke(); } else if (b.kind === "mage") { ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke(); } else if (b.kind === "sniper") { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, 2, 0, Math.PI * 2); ctx.fill(); } else if (b.bounces > 0) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); } } ctx.shadowBlur = 0;
   for (const blast of state.explosions || []) { if (!visible(blast.x, blast.y, 0, 0, blast.radius)) continue; const total = blast.magic ? .25 : .35, alpha = Math.max(0, blast.life / total), radius = blast.radius * (1 - alpha * .45); ctx.save(); ctx.globalAlpha = alpha; ctx.fillStyle = `${blast.color}44`; ctx.strokeStyle = blast.magic ? "#f6e8ff" : blast.color; ctx.lineWidth = blast.magic ? 4 : 7; ctx.shadowBlur = mobileMode ? 10 : 30; ctx.shadowColor = blast.color; ctx.beginPath(); ctx.arc(blast.x - camera.x, blast.y - camera.y, radius, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore(); }
 }
 function render(now) {
   updateLocalPrediction(now); updateLatency(now);
-  const displayPlayers = smoothedPlayers(now), me = displayPlayers.find(player => player.id === myId);
+  const displayPlayers = smoothedPlayers(), me = displayPlayers.find(player => player.id === myId);
   if (me) { camera.x += (me.x - sceneWidth / 2 - camera.x) * .12; camera.y += (me.y - sceneHeight / 2 - camera.y) * .12; camera.x = Math.max(0, Math.min(world.width - sceneWidth, camera.x)); camera.y = Math.max(0, Math.min(world.height - sceneHeight, camera.y)); }
   ctx.save(); ctx.scale(viewScale, viewScale);
   drawGrid(); (state.pickups || []).forEach(p => drawPickup(p, now)); (state.obstacles || []).forEach(drawObstacle); drawSpeedTrails(); drawProjectiles(now); drawMinions(displayPlayers); displayPlayers.forEach(drawPlayer);

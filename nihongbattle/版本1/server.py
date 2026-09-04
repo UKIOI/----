@@ -13,7 +13,7 @@ ROOT = Path(__file__).parent
 WIDTH, HEIGHT = 1600, 900
 TICK_RATE = 30
 NETWORK_RATE = 25
-PROTOCOL_VERSION = 13
+PROTOCOL_VERSION = 12
 PLAYER_SPEED = 300
 BULLET_SPEED = 760
 CHAT_MAX_LENGTH = 120
@@ -105,7 +105,6 @@ class Room:
         self.terrain = build_terrain()
         self.next_pickup_id = 0
         self.next_minion_id = 0
-        self.next_bullet_id = 0
         self.last = time.monotonic()
         self.last_broadcast = 0
         self.task = asyncio.create_task(self.loop())
@@ -149,11 +148,6 @@ class Room:
     def next_player_color(self):
         used = {player["color"] for player in self.players.values()}
         return next((color for color in COLORS if color not in used), COLORS[len(self.players) % len(COLORS)])
-
-    def add_bullet(self, bullet):
-        bullet["id"] = self.next_bullet_id
-        self.next_bullet_id += 1
-        self.bullets.append(bullet)
 
     def spawn(self, player):
         x, y = self.random_open_position(PLAYER_RADIUS + 15)
@@ -293,10 +287,10 @@ class Room:
                     continue
                 minion["last_shot"] = now
                 angle = math.atan2(target["y"] - minion["y"], target["x"] - minion["x"])
-                self.add_bullet({"x": minion["x"], "y": minion["y"], "vx": math.cos(angle) * 620,
-                                 "vy": math.sin(angle) * 620, "owner": owner["id"], "color": owner["color"],
-                                 "damage": 10, "damage_type": "normal", "radius": 5, "kind": "minion",
-                                 "bounces": 0, "life": 2.2, "created": now})
+                self.bullets.append({"x": minion["x"], "y": minion["y"], "vx": math.cos(angle) * 620,
+                                     "vy": math.sin(angle) * 620, "owner": owner["id"], "color": owner["color"],
+                                     "damage": 10, "damage_type": "normal", "radius": 5, "kind": "minion",
+                                     "bounces": 0, "life": 2.2, "created": now})
 
     def advance_bullet(self, bullet, dt):
         old_x, old_y = bullet["x"], bullet["y"]
@@ -435,11 +429,11 @@ class Room:
                 p["last_shot"] = now
                 angle = p["input"]["angle"]
                 if cannon:
-                    self.add_bullet({"x": p["x"], "y": p["y"],
-                                     "vx": math.cos(angle) * 430, "vy": math.sin(angle) * 430,
-                                     "owner": p["id"], "color": p["color"], "damage": 70,
-                                     "damage_type": "explosive", "radius": 18, "kind": "cannon",
-                                     "bounces": 0, "life": 3, "created": now})
+                    self.bullets.append({"x": p["x"], "y": p["y"],
+                                         "vx": math.cos(angle) * 430, "vy": math.sin(angle) * 430,
+                                         "owner": p["id"], "color": p["color"], "damage": 70,
+                                         "damage_type": "explosive", "radius": 18, "kind": "cannon",
+                                         "bounces": 0, "life": 3, "created": now})
                 elif laser:
                     self.fire_laser(p, angle, now, 50)
                 elif beam:
@@ -452,13 +446,13 @@ class Room:
                         bullet_damage = 37.5 if role == "mage" else 75 if role == "sniper" else damage
                         bullet_speed = 1200 if role == "sniper" else 700 if role == "mage" else BULLET_SPEED
                         bullet_radius = 9 if role == "mage" else 5 if role == "sniper" else 6
-                        self.add_bullet({"x": p["x"], "y": p["y"],
-                                         "vx": math.cos(shot_angle) * bullet_speed,
-                                         "vy": math.sin(shot_angle) * bullet_speed,
-                                         "owner": p["id"], "color": p["color"], "damage": bullet_damage,
-                                         "damage_type": "normal", "radius": bullet_radius, "kind": bullet_kind,
-                                         "bounces": 3 if p["effects"].get("ricochet", 0) > now else 0,
-                                         "life": 2.5, "created": now})
+                        self.bullets.append({"x": p["x"], "y": p["y"],
+                                             "vx": math.cos(shot_angle) * bullet_speed,
+                                             "vy": math.sin(shot_angle) * bullet_speed,
+                                             "owner": p["id"], "color": p["color"], "damage": bullet_damage,
+                                             "damage_type": "normal", "radius": bullet_radius, "kind": bullet_kind,
+                                             "bounces": 3 if p["effects"].get("ricochet", 0) > now else 0,
+                                             "life": 2.5, "created": now})
 
             for pickup in self.pickups:
                 if pickup["active"] and math.hypot(p["x"] - pickup["x"], p["y"] - pickup["y"]) < 45:
@@ -519,7 +513,7 @@ class Room:
 
     async def broadcast(self):
         now = time.monotonic()
-        payload = json.dumps({"type": "state", "server_time": round(now * 1000, 3), "players": [
+        payload = json.dumps({"type": "state", "players": [
             {**{k: p[k] for k in ("id", "name", "max_hp", "score", "color", "role", "ready")},
              "x": round(p["x"], 1), "y": round(p["y"], 1), "hp": round(p["hp"], 1),
              "input_seq": p.get("input_seq", -1),
@@ -534,7 +528,7 @@ class Room:
         ], "bullets": [{"x": round(b["x"], 1), "y": round(b["y"], 1),
                           "vx": round(b["vx"], 1), "vy": round(b["vy"], 1),
                           "age": round(max(0, now - b.get("created", now)), 3),
-                          **{k: b[k] for k in ("id", "owner", "color", "bounces", "radius", "kind")}} for b in self.bullets],
+                          **{k: b[k] for k in ("owner", "color", "bounces", "radius", "kind")}} for b in self.bullets],
            "lasers": [{**{k: round(value, 1) if k in {"x1", "y1", "x2", "y2", "life"} else value
                            for k, value in laser.items() if k != "created"},
                        "age": round(max(0, now - laser.get("created", now)), 3)} for laser in self.lasers],

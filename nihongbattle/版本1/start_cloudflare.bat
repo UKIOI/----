@@ -1,0 +1,1 @@
+@echo off & chcp 65001 >nul & title 霓虹乱斗 - Cloudflare备用联机 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_cloudflare.ps1" %* & echo. & echo Cloudflare联机已经停止，按任意键关闭窗口。 & pause >nul

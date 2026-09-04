@@ -1,4 +1,4 @@
 {
-  "compilerOptions": {"target": "ES2022", "useDefineForClassFields": true, "module": "ESNext", "moduleResolution": "Bundler", "strict": true, "jsx": "preserve", "resolveJsonModule": true, "isolatedModules": true, "esModuleInterop": true, "lib": ["ES2022", "DOM"]},
+  "compilerOptions": {"target": "ES2022", "useDefineForClassFields": true, "module": "ESNext", "moduleResolution": "Bundler", "strict": true, "jsx": "preserve", "resolveJsonModule": true, "isolatedModules": true, "esModuleInterop": true, "types": ["vite/client", "node"], "lib": ["ESNext", "DOM"]},
   "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts"]
 }

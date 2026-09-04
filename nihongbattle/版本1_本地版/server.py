@@ -12,8 +12,7 @@ from aiohttp import WSMsgType, web
 ROOT = Path(__file__).parent
 WIDTH, HEIGHT = 1600, 900
 TICK_RATE = 30
-NETWORK_RATE = 25
-PROTOCOL_VERSION = 13
+NETWORK_RATE = 30
 PLAYER_SPEED = 300
 BULLET_SPEED = 760
 CHAT_MAX_LENGTH = 120
@@ -41,14 +40,6 @@ rooms: dict[str, "Room"] = {}
 
 def clamp(value, low, high):
     return max(low, min(high, value))
-
-
-def finite_number(value, fallback=0.0):
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return fallback
-    return number if math.isfinite(number) else fallback
 
 
 def circle_hits_rect(x, y, radius, rect):
@@ -105,7 +96,6 @@ class Room:
         self.terrain = build_terrain()
         self.next_pickup_id = 0
         self.next_minion_id = 0
-        self.next_bullet_id = 0
         self.last = time.monotonic()
         self.last_broadcast = 0
         self.task = asyncio.create_task(self.loop())
@@ -150,11 +140,6 @@ class Room:
         used = {player["color"] for player in self.players.values()}
         return next((color for color in COLORS if color not in used), COLORS[len(self.players) % len(COLORS)])
 
-    def add_bullet(self, bullet):
-        bullet["id"] = self.next_bullet_id
-        self.next_bullet_id += 1
-        self.bullets.append(bullet)
-
     def spawn(self, player):
         x, y = self.random_open_position(PLAYER_RADIUS + 15)
         player.update(x=x, y=y, hp=player.get("max_hp", 100))
@@ -194,6 +179,16 @@ class Room:
         next_y = clamp(player["y"] + dy, PLAYER_RADIUS, HEIGHT - PLAYER_RADIUS)
         if not any(circle_hits_rect(player["x"], next_y, PLAYER_RADIUS, obstacle) for obstacle in self.active_terrain()):
             player["y"] = next_y
+
+    def settle_player_stop(self, player, target_x, target_y):
+        distance = math.hypot(target_x - player["x"], target_y - player["y"])
+        if not math.isfinite(distance) or distance > 70:
+            return
+        steps = max(1, math.ceil(distance / 5))
+        for index in range(steps):
+            remaining = steps - index
+            self.move_player(player, (target_x - player["x"]) / remaining,
+                             (target_y - player["y"]) / remaining)
 
     def add_minion(self, player, movement="orbit"):
         player.setdefault("minions", []).append({"id": self.next_minion_id,
@@ -293,10 +288,10 @@ class Room:
                     continue
                 minion["last_shot"] = now
                 angle = math.atan2(target["y"] - minion["y"], target["x"] - minion["x"])
-                self.add_bullet({"x": minion["x"], "y": minion["y"], "vx": math.cos(angle) * 620,
-                                 "vy": math.sin(angle) * 620, "owner": owner["id"], "color": owner["color"],
-                                 "damage": 10, "damage_type": "normal", "radius": 5, "kind": "minion",
-                                 "bounces": 0, "life": 2.2, "created": now})
+                self.bullets.append({"x": minion["x"], "y": minion["y"], "vx": math.cos(angle) * 620,
+                                     "vy": math.sin(angle) * 620, "owner": owner["id"], "color": owner["color"],
+                                     "damage": 10, "damage_type": "normal", "radius": 5, "kind": "minion",
+                                     "bounces": 0, "life": 2.2, "created": now})
 
     def advance_bullet(self, bullet, dt):
         old_x, old_y = bullet["x"], bullet["y"]
@@ -402,16 +397,11 @@ class Room:
                 if now >= p["respawn"]:
                     self.spawn(p)
                 continue
-            if now - p.get("last_input", now) > 0.75:
-                p["input"].update(up=False, down=False, left=False, right=False,
-                                  move_x=0, move_y=0, shoot=False, ability=False)
             dx = p["input"].get("move_x", p["input"]["right"] - p["input"]["left"])
             dy = p["input"].get("move_y", p["input"]["down"] - p["input"]["up"])
-            length = math.hypot(dx, dy)
-            if length > 1:
-                dx, dy = dx / length, dy / length
+            length = math.hypot(dx, dy) or 1
             speed = PLAYER_SPEED * (1.45 if p["effects"].get("speed", 0) > now else 1)
-            self.move_player(p, dx * speed * dt, dy * speed * dt)
+            self.move_player(p, dx / length * speed * dt, dy / length * speed * dt)
             rapid = p["effects"].get("rapid", 0) > now
             cannon = p["effects"].get("cannon", 0) > now
             laser = p["effects"].get("laser", 0) > now
@@ -435,11 +425,11 @@ class Room:
                 p["last_shot"] = now
                 angle = p["input"]["angle"]
                 if cannon:
-                    self.add_bullet({"x": p["x"], "y": p["y"],
-                                     "vx": math.cos(angle) * 430, "vy": math.sin(angle) * 430,
-                                     "owner": p["id"], "color": p["color"], "damage": 70,
-                                     "damage_type": "explosive", "radius": 18, "kind": "cannon",
-                                     "bounces": 0, "life": 3, "created": now})
+                    self.bullets.append({"x": p["x"], "y": p["y"],
+                                         "vx": math.cos(angle) * 430, "vy": math.sin(angle) * 430,
+                                         "owner": p["id"], "color": p["color"], "damage": 70,
+                                         "damage_type": "explosive", "radius": 18, "kind": "cannon",
+                                         "bounces": 0, "life": 3, "created": now})
                 elif laser:
                     self.fire_laser(p, angle, now, 50)
                 elif beam:
@@ -452,13 +442,13 @@ class Room:
                         bullet_damage = 37.5 if role == "mage" else 75 if role == "sniper" else damage
                         bullet_speed = 1200 if role == "sniper" else 700 if role == "mage" else BULLET_SPEED
                         bullet_radius = 9 if role == "mage" else 5 if role == "sniper" else 6
-                        self.add_bullet({"x": p["x"], "y": p["y"],
-                                         "vx": math.cos(shot_angle) * bullet_speed,
-                                         "vy": math.sin(shot_angle) * bullet_speed,
-                                         "owner": p["id"], "color": p["color"], "damage": bullet_damage,
-                                         "damage_type": "normal", "radius": bullet_radius, "kind": bullet_kind,
-                                         "bounces": 3 if p["effects"].get("ricochet", 0) > now else 0,
-                                         "life": 2.5, "created": now})
+                        self.bullets.append({"x": p["x"], "y": p["y"],
+                                             "vx": math.cos(shot_angle) * bullet_speed,
+                                             "vy": math.sin(shot_angle) * bullet_speed,
+                                             "owner": p["id"], "color": p["color"], "damage": bullet_damage,
+                                             "damage_type": "normal", "radius": bullet_radius, "kind": bullet_kind,
+                                             "bounces": 3 if p["effects"].get("ricochet", 0) > now else 0,
+                                             "life": 2.5, "created": now})
 
             for pickup in self.pickups:
                 if pickup["active"] and math.hypot(p["x"] - pickup["x"], p["y"] - pickup["y"]) < 45:
@@ -519,10 +509,9 @@ class Room:
 
     async def broadcast(self):
         now = time.monotonic()
-        payload = json.dumps({"type": "state", "server_time": round(now * 1000, 3), "players": [
+        payload = json.dumps({"type": "state", "players": [
             {**{k: p[k] for k in ("id", "name", "max_hp", "score", "color", "role", "ready")},
              "x": round(p["x"], 1), "y": round(p["y"], 1), "hp": round(p["hp"], 1),
-             "input_seq": p.get("input_seq", -1),
              "move_x": round(p["input"].get("move_x", 0), 3), "move_y": round(p["input"].get("move_y", 0), 3),
              "effects": {kind: round(expires - now, 1) for kind, expires in p["effects"].items() if expires > now},
              "weapon_cooldown": max(0, round(p.get("next_weapon", 0) - now, 1)),
@@ -534,7 +523,7 @@ class Room:
         ], "bullets": [{"x": round(b["x"], 1), "y": round(b["y"], 1),
                           "vx": round(b["vx"], 1), "vy": round(b["vy"], 1),
                           "age": round(max(0, now - b.get("created", now)), 3),
-                          **{k: b[k] for k in ("id", "owner", "color", "bounces", "radius", "kind")}} for b in self.bullets],
+                          **{k: b[k] for k in ("owner", "color", "bounces", "radius", "kind")}} for b in self.bullets],
            "lasers": [{**{k: round(value, 1) if k in {"x1", "y1", "x2", "y2", "life"} else value
                            for k, value in laser.items() if k != "created"},
                        "age": round(max(0, now - laser.get("created", now)), 3)} for laser in self.lasers],
@@ -585,13 +574,12 @@ async def websocket(request):
                   "hp": 0, "max_hp": 100, "score": 0, "color": room.next_player_color(), "ws": ws, "last_shot": 0,
                   "respawn": 0, "effects": {}, "minions": [], "role": None, "ready": ready,
                   "next_weapon": 0, "ability_ready": 0, "master_weapon": None, "last_chat": 0,
-                  "last_input": time.monotonic(), "input_seq": -1,
                   "input": {"up": 0, "down": 0, "left": 0, "right": 0, "shoot": False, "ability": False, "angle": 0}}
         if ready:
             room.spawn(player)
         room.players[pid] = player
         now = time.monotonic()
-        await ws.send_json({"type": "welcome", "protocol": PROTOCOL_VERSION, "edition": "internet", "network_rate": NETWORK_RATE,
+        await ws.send_json({"type": "welcome", "protocol": 10, "edition": "local", "network_rate": NETWORK_RATE,
                             "id": pid, "room": code, "mode": mode, "width": WIDTH, "height": HEIGHT,
                             "obstacles": [{**{k: block[k] for k in ("id", "x", "y", "w", "h", "active")},
                                            "restore": max(0, round(block["restore"] - now, 1))}
@@ -600,24 +588,23 @@ async def websocket(request):
             if msg.type == WSMsgType.TEXT:
                 data = json.loads(msg.data)
                 if data.get("type") == "input":
-                    sequence = int(finite_number(data.get("seq"), player.get("input_seq", -1) + 1))
-                    if sequence <= player.get("input_seq", -1):
-                        continue
-                    player["input_seq"] = sequence
                     inp = player["input"]
+                    was_moving = math.hypot(inp.get("move_x", 0), inp.get("move_y", 0)) > 0.01
                     for key in ("up", "down", "left", "right", "shoot", "ability"):
                         inp[key] = bool(data.get(key))
-                    move_x = finite_number(data.get("move_x"), inp["right"] - inp["left"])
-                    move_y = finite_number(data.get("move_y"), inp["down"] - inp["up"])
+                    move_x = float(data.get("move_x", inp["right"] - inp["left"]))
+                    move_y = float(data.get("move_y", inp["down"] - inp["up"]))
                     move_length = math.hypot(move_x, move_y)
                     if not math.isfinite(move_length):
                         move_x = move_y = 0
                     elif move_length > 1:
                         move_x, move_y = move_x / move_length, move_y / move_length
-                    angle = finite_number(data.get("angle"))
+                    angle = float(data.get("angle", 0))
                     inp["move_x"], inp["move_y"] = move_x, move_y
-                    inp["angle"] = angle
-                    player["last_input"] = time.monotonic()
+                    inp["angle"] = angle if math.isfinite(angle) else 0
+                    if was_moving and move_length <= 0.01:
+                        room.settle_player_stop(player, float(data.get("stop_x", player["x"])),
+                                                float(data.get("stop_y", player["y"])))
                 elif data.get("type") == "select_role":
                     room.select_role(player, str(data.get("role", "")), time.monotonic())
                 elif data.get("type") == "ability":
@@ -648,7 +635,7 @@ async def index(_):
 
 
 async def health(_):
-    return web.json_response({"game": "neon-brawl", "edition": "internet", "status": "ok", "protocol": PROTOCOL_VERSION})
+    return web.json_response({"game": "neon-brawl", "edition": "local", "status": "ok", "protocol": 10})
 
 
 app = web.Application()

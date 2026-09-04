@@ -14,7 +14,7 @@ $runtimeDir = Join-Path $projectDir ".runtime"
 $serverProcess = $null
 $tunnelProcess = $null
 $ownsServer = $false
-$expectedProtocol = 13
+$expectedProtocol = 12
 $instanceLock = [Threading.Mutex]::new($false, "Local\NeonBrawlInternet$Port")
 $lockTaken = $false
 
