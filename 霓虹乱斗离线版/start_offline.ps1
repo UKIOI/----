@@ -17,11 +17,24 @@ if (-not $python) {
     throw "没有找到 Python，请先安装 Python 3。"
 }
 
-& $python.Source -c "import aiohttp" 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "正在安装游戏依赖……" -ForegroundColor Cyan
-    & $python.Source -m pip install -r (Join-Path $projectDir "requirements.txt")
-    if ($LASTEXITCODE -ne 0) { throw "依赖安装失败。" }
+$previousErrorActionPreference = $ErrorActionPreference
+$dependencyReady = $false
+try {
+    # 新电脑第一次运行时，模块不存在会向 stderr 写入信息；这里将它作为检测结果处理，不能让 PowerShell 提前退出。
+    $ErrorActionPreference = "Continue"
+    & $python.Source -c "import aiohttp" *> $null
+    $dependencyReady = $LASTEXITCODE -eq 0
+    if (-not $dependencyReady) {
+        Write-Host "首次运行，正在安装游戏依赖，请稍候……" -ForegroundColor Cyan
+        & $python.Source -m pip install --disable-pip-version-check -r (Join-Path $projectDir "requirements.txt")
+        $dependencyReady = $LASTEXITCODE -eq 0
+    }
+}
+finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+if (-not $dependencyReady) {
+    throw "游戏依赖安装失败。请确认电脑可以访问互联网，然后重新双击启动文件。"
 }
 
 try {
