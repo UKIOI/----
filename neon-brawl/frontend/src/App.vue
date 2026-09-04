@@ -1,0 +1,21 @@
+<script setup lang="ts">
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import BattleCanvas from './components/BattleCanvas.vue'; import BotSettings from './components/BotSettings.vue'; import ChatPanel from './components/ChatPanel.vue'; import Hud from './components/Hud.vue'; import JoinMenu from './components/JoinMenu.vue'; import MobileControls from './components/MobileControls.vue'; import RoleSelector from './components/RoleSelector.vue'
+import { inputPayload, joinPayload, rolePayload, websocketUrl } from './network/client'; import type { GameState, Mode, Player, Role, Welcome } from './types/protocol'
+const name = ref('玩家'); const room = ref('PUBLIC'); const mode = ref<Mode>('classic'); const connected = ref(false); const status = ref('等待加入'); const ws = ref<WebSocket | null>(null); const playerId = ref<string | null>(null); const world = ref<Welcome | null>(null); const state = ref<GameState | null>(null); const messages = ref<Array<{ name: string; message: string; color: string }>>([]); const seq = ref(0); const moveX = ref(0); const moveY = ref(0); const aim = ref(0); const bots = ref(0); const difficulty = ref('normal'); let timer = 0
+const me = computed<Player | undefined>(() => state.value?.players.find(player => player.id === playerId.value)); const offline = computed(() => world.value?.edition === 'offline' || import.meta.env.VITE_APP_EDITION === 'offline')
+function send(payload: object) { if (ws.value?.readyState === WebSocket.OPEN) ws.value.send(JSON.stringify(payload)) }
+function join() { status.value = '连接中...'; const socket = new WebSocket(websocketUrl()); ws.value = socket; socket.onopen = () => send(joinPayload(name.value, room.value, mode.value)); socket.onmessage = event => { const data = JSON.parse(event.data); if (data.type === 'welcome') { world.value = data; playerId.value = data.id; connected.value = true; status.value = '已连接' } else if (data.type === 'state') state.value = data; else if (data.type === 'chat') messages.value.push(data); else if (data.type === 'error') status.value = data.message }; socket.onerror = () => { status.value = '连接失败'; connected.value = false }; socket.onclose = () => { status.value = '连接断开'; connected.value = false } }
+function sendInput() { send(inputPayload(++seq.value, moveX.value, moveY.value, aim.value, false)) }
+function chooseRole(role: Role) { send(rolePayload(role)); status.value = '正在进入战场...' }
+function chat(message: string) { send({ type: 'chat', message }) }
+function configureBots(count: number, selectedDifficulty: string) { bots.value = Math.max(0, Math.min(11, count)); difficulty.value = selectedDifficulty; send({ type: 'bots', count: bots.value, difficulty: difficulty.value }) }
+function keydown(event: KeyboardEvent) { if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return; moveX.value = Number(event.key === 'd' || event.key === 'ArrowRight') - Number(event.key === 'a' || event.key === 'ArrowLeft'); moveY.value = Number(event.key === 's' || event.key === 'ArrowDown') - Number(event.key === 'w' || event.key === 'ArrowUp'); if (moveX.value || moveY.value) sendInput() }
+function keyup() { moveX.value = 0; moveY.value = 0; sendInput() }
+onMounted(() => { addEventListener('keydown', keydown); addEventListener('keyup', keyup); timer = window.setInterval(sendInput, 1000 / 30) }); onUnmounted(() => { removeEventListener('keydown', keydown); removeEventListener('keyup', keyup); clearInterval(timer); ws.value?.close() })
+</script>
+<template>
+  <main class="app-shell"><JoinMenu v-if="!connected" v-model:name="name" v-model:room="room" v-model:mode="mode" :offline="offline" @join="join" />
+    <template v-else><BattleCanvas :state="state" :world="world" :player-id="playerId" /><Hud :status="status" :player-count="state?.players.length || 0" :room="world?.room || room" :edition="world?.edition || 'internet'" /><RoleSelector :visible="mode === 'profession' && !me?.ready" @select="chooseRole" /><ChatPanel :messages="messages" @send="chat" /><BotSettings :visible="offline" :count="bots" :difficulty="difficulty" @configure="configureBots" /><MobileControls @move="(x, y) => { moveX = x; moveY = y; sendInput() }" @aim="(x, y) => { aim = Math.atan2(y, x); sendInput() }" /></template>
+  </main>
+</template>

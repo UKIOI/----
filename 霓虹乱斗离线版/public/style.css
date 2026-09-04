@@ -71,23 +71,21 @@ canvas { display: block; cursor: crosshair; touch-action: none; }
 .role-grid b, .role-grid small { display: block; }
 .role-grid b { font-size: 17px; margin-bottom: 7px; }
 .role-grid small { color: #91a3c3; }
-@media (hover: none), (pointer: coarse), (max-width: 650px) {
-  #joystick, #aimJoystick { display: block; }
-  #skillButton:not([hidden]) { display: block; }
-  .desktop-help { display: none; }
-  .touch-help { display: inline; }
-  #joystick { left: max(14px, env(safe-area-inset-left)); bottom: max(18px, env(safe-area-inset-bottom)); width: min(126px, 29vh); height: min(126px, 29vh); }
-  #aimJoystick { right: max(14px, env(safe-area-inset-right)); bottom: max(18px, env(safe-area-inset-bottom)); width: min(126px, 29vh); height: min(126px, 29vh); }
-  #joystickKnob, #aimJoystickKnob { width: 43%; height: 43%; }
-  #help { bottom: max(6px, env(safe-area-inset-bottom)); font-size: 10px; width: auto; max-width: calc(var(--view-width) - 300px); left: 50%; transform: translateX(-50%); text-align: center; white-space: normal; pointer-events: none; }
-  #hud { top: max(6px, env(safe-area-inset-top)); left: max(6px, env(safe-area-inset-left)); max-width: calc(var(--view-width) - 12px); padding: 7px 10px; font-size: 11px; }
-  #powerups { margin-top: 4px; font-size: 10px; }
-  #chatToggle { top: max(6px, env(safe-area-inset-top)); right: max(6px, env(safe-area-inset-right)); min-width: 74px; padding: 7px 10px; font-size: 12px; }
-  #botToggle { top: max(6px, env(safe-area-inset-top)); right: max(88px, calc(env(safe-area-inset-right) + 82px)); min-width: 70px; padding: 7px 9px; font-size: 12px; }
-  #botPanel { top: max(44px, calc(env(safe-area-inset-top) + 42px)); right: max(5px, env(safe-area-inset-right)); width: min(270px, calc(var(--view-width) - 10px)); }
-  #chatPanel { top: max(5px, env(safe-area-inset-top)); right: max(5px, env(safe-area-inset-right)); width: min(370px, calc(var(--view-width) - 10px)); height: min(310px, calc(var(--view-height) - 10px)); }
-}
-@media (hover: none) and (orientation: portrait), (pointer: coarse) and (orientation: portrait) { #rotateNotice { display: grid; } }
+html.mobile-controls #joystick, html.mobile-controls #aimJoystick { display: block; }
+html.mobile-controls #skillButton:not([hidden]) { display: block; }
+html.mobile-controls .desktop-help { display: none; }
+html.mobile-controls .touch-help { display: inline; }
+html.mobile-controls #joystick { left: max(14px, env(safe-area-inset-left)); bottom: max(18px, env(safe-area-inset-bottom)); width: min(126px, 29vh); height: min(126px, 29vh); }
+html.mobile-controls #aimJoystick { right: max(14px, env(safe-area-inset-right)); bottom: max(18px, env(safe-area-inset-bottom)); width: min(126px, 29vh); height: min(126px, 29vh); }
+html.mobile-controls #joystickKnob, html.mobile-controls #aimJoystickKnob { width: 43%; height: 43%; }
+html.mobile-controls #help { bottom: max(6px, env(safe-area-inset-bottom)); font-size: 10px; width: auto; max-width: calc(var(--view-width) - 300px); left: 50%; transform: translateX(-50%); text-align: center; white-space: normal; pointer-events: none; }
+html.mobile-controls #hud { top: max(6px, env(safe-area-inset-top)); left: max(6px, env(safe-area-inset-left)); max-width: calc(var(--view-width) - 12px); padding: 7px 10px; font-size: 11px; }
+html.mobile-controls #powerups { margin-top: 4px; font-size: 10px; }
+html.mobile-controls #chatToggle { top: max(6px, env(safe-area-inset-top)); right: max(6px, env(safe-area-inset-right)); min-width: 74px; padding: 7px 10px; font-size: 12px; }
+html.mobile-controls #botToggle { top: max(6px, env(safe-area-inset-top)); right: max(88px, calc(env(safe-area-inset-right) + 82px)); min-width: 70px; padding: 7px 9px; font-size: 12px; }
+html.mobile-controls #botPanel { top: max(44px, calc(env(safe-area-inset-top) + 42px)); right: max(5px, env(safe-area-inset-right)); width: min(270px, calc(var(--view-width) - 10px)); }
+html.mobile-controls #chatPanel { top: max(5px, env(safe-area-inset-top)); right: max(5px, env(safe-area-inset-right)); width: min(370px, calc(var(--view-width) - 10px)); height: min(310px, calc(var(--view-height) - 10px)); }
+@media (orientation: portrait) { html.mobile-controls #rotateNotice { display: grid; } }
 @media (orientation: landscape) and (max-height: 500px) {
   .role-card { width: min(88vw, 650px); padding: 14px 20px; }
   .role-card h2 { font-size: 21px; }

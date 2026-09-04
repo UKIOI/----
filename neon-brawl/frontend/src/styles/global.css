@@ -1,0 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600;700&family=Noto+Sans+SC:wght@400;600&display=swap');
+:root { color-scheme: dark; font-family: 'Noto Sans SC', sans-serif; background: #070a12; color: #eef4ff; }
+* { box-sizing: border-box; } body { margin: 0; min-width: 320px; min-height: 100vh; overflow: hidden; }
+button, input, select { font: inherit; } button { cursor: pointer; }

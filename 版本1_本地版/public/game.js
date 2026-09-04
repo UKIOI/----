@@ -32,7 +32,10 @@ let ws, myId = null, requestedMode = "classic", world = { width: 1600, height: 9
 let state = { players: [], bullets: [], lasers: [], explosions: [], pickups: [], obstacles: [] };
 let keys = {}, mouse = { x: 0, y: 0, down: false }, touchMove = { x: 0, y: 0 }, touchAim = { x: 1, y: 0, active: false };
 let movePointer = null, aimPointer = null;
-const mobileMode = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
+const mobileUserAgent = navigator.userAgentData?.mobile === true || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|HarmonyOS|Mobile/i.test(navigator.userAgent);
+const ipadLike = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+const mobileMode = mobileUserAgent || ipadLike;
+document.documentElement.classList.toggle("mobile-controls", mobileMode);
 const viewScale = mobileMode ? .72 : 1;
 let camera = { x: 0, y: 0 }, lastSend = 0, receivedState = false, stateReceivedAt = performance.now();
 let unreadChats = 0;
