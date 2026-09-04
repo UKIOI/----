@@ -180,6 +180,16 @@ class Room:
         if not any(circle_hits_rect(player["x"], next_y, PLAYER_RADIUS, obstacle) for obstacle in self.active_terrain()):
             player["y"] = next_y
 
+    def settle_player_stop(self, player, target_x, target_y):
+        distance = math.hypot(target_x - player["x"], target_y - player["y"])
+        if not math.isfinite(distance) or distance > 70:
+            return
+        steps = max(1, math.ceil(distance / 5))
+        for index in range(steps):
+            remaining = steps - index
+            self.move_player(player, (target_x - player["x"]) / remaining,
+                             (target_y - player["y"]) / remaining)
+
     def add_minion(self, player, movement="orbit"):
         player.setdefault("minions", []).append({"id": self.next_minion_id,
                                                    "hp": player.get("max_hp", 100) / 3,
@@ -569,7 +579,7 @@ async def websocket(request):
             room.spawn(player)
         room.players[pid] = player
         now = time.monotonic()
-        await ws.send_json({"type": "welcome", "protocol": 9, "edition": "internet", "network_rate": NETWORK_RATE,
+        await ws.send_json({"type": "welcome", "protocol": 10, "edition": "internet", "network_rate": NETWORK_RATE,
                             "id": pid, "room": code, "mode": mode, "width": WIDTH, "height": HEIGHT,
                             "obstacles": [{**{k: block[k] for k in ("id", "x", "y", "w", "h", "active")},
                                            "restore": max(0, round(block["restore"] - now, 1))}
@@ -579,6 +589,7 @@ async def websocket(request):
                 data = json.loads(msg.data)
                 if data.get("type") == "input":
                     inp = player["input"]
+                    was_moving = math.hypot(inp.get("move_x", 0), inp.get("move_y", 0)) > 0.01
                     for key in ("up", "down", "left", "right", "shoot", "ability"):
                         inp[key] = bool(data.get(key))
                     move_x = float(data.get("move_x", inp["right"] - inp["left"]))
@@ -591,6 +602,9 @@ async def websocket(request):
                     angle = float(data.get("angle", 0))
                     inp["move_x"], inp["move_y"] = move_x, move_y
                     inp["angle"] = angle if math.isfinite(angle) else 0
+                    if was_moving and move_length <= 0.01:
+                        room.settle_player_stop(player, float(data.get("stop_x", player["x"])),
+                                                float(data.get("stop_y", player["y"])))
                 elif data.get("type") == "select_role":
                     room.select_role(player, str(data.get("role", "")), time.monotonic())
                 elif data.get("type") == "ability":
@@ -621,7 +635,7 @@ async def index(_):
 
 
 async def health(_):
-    return web.json_response({"game": "neon-brawl", "status": "ok", "protocol": 9})
+    return web.json_response({"game": "neon-brawl", "status": "ok", "protocol": 10})
 
 
 app = web.Application()

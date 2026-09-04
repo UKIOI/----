@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $runtimeDir = Join-Path $projectDir ".runtime"
 $serverProcess = $null
-$expectedProtocol = 9
+$expectedProtocol = 10
 
 function Get-LanAddress {
     try {

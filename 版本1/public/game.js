@@ -64,7 +64,7 @@ function connect() {
   ws.onmessage = event => {
     const data = JSON.parse(event.data);
     if (data.type === "welcome") {
-      if (data.protocol !== 9 || data.mode !== requestedMode) {
+      if (data.protocol !== 10 || data.mode !== requestedMode) {
         alert("客户端与服务器版本不一致，请重启服务器并强制刷新页面");
         ws.close();
         return;
@@ -224,7 +224,9 @@ function sendInput(now = performance.now(), force = false) {
   ws.send(JSON.stringify({ type: "input",
     up: keys.w || keys.arrowup || touchMove.y < -.18, down: keys.s || keys.arrowdown || touchMove.y > .18,
     left: keys.a || keys.arrowleft || touchMove.x < -.18, right: keys.d || keys.arrowright || touchMove.x > .18,
-    move_x: movement.x, move_y: movement.y, shoot: mouse.down || touchAim.active, ability: Boolean(keys[" "]), angle }));
+    move_x: movement.x, move_y: movement.y, stop_x: movement.moving ? undefined : aimOrigin.x,
+    stop_y: movement.moving ? undefined : aimOrigin.y,
+    shoot: mouse.down || touchAim.active, ability: Boolean(keys[" "]), angle }));
 }
 function visible(x, y, width = 0, height = 0, margin = 70) {
   return x + width >= camera.x - margin && x <= camera.x + sceneWidth + margin && y + height >= camera.y - margin && y <= camera.y + sceneHeight + margin;
@@ -276,7 +278,7 @@ function updateLocalPrediction(now) {
   if (!movement.moving && (now < predictionHoldUntil || serverMoving)) return;
   const local = world.edition === "local", stateAge = Math.max(0, now - stateReceivedAt) / 1000;
   const baseLead = local ? 0 : Math.min(.14, Math.max(.035, (latency ?? 140) / 2000 + 1 / (world.network_rate || 25)));
-  const lead = movement.moving ? Math.min(local ? .045 : .19, baseLead + stateAge) : 0;
+  const lead = movement.moving ? (local ? 0 : Math.min(.19, baseLead + stateAge)) : 0;
   let targetX = me.x, targetY = me.y;
   const targetNextX = Math.max(radius, Math.min(world.width - radius, targetX + movement.x * speed * lead));
   if (!(state.obstacles || []).some(obstacle => predictedCircleHitsRect(targetNextX, targetY, radius, obstacle))) targetX = targetNextX;

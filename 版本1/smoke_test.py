@@ -64,6 +64,11 @@ async def main():
     assert unit_room.advance_bullet(wall_bounce, 0.2) and wall_bounce["vx"] == -100, "子弹障碍物反弹错误"
     wall_shot = {"x": 225, "y": 170, "vx": 760, "vy": 0, "radius": 6, "bounces": 0}
     assert not unit_room.advance_bullet(wall_shot, 0.1), "贴墙射击穿过了障碍物"
+    stopping_player = {"x": 225, "y": 170}
+    unit_room.settle_player_stop(stopping_player, 270, 170)
+    assert stopping_player["x"] == 225, "停止位置对齐把玩家推进了墙体"
+    unit_room.settle_player_stop(stopping_player, 400, 170)
+    assert stopping_player["x"] == 225, "停止位置对齐接受了过远坐标"
     unit_room.task.cancel()
 
     class_room = Room("CLASS_UNIT", "profession")
@@ -110,7 +115,7 @@ async def main():
             assert 'data-role="weaponmaster"' in page and 'data-role="paladin"' in page and 'id="skillButton"' in page, "新职业界面未加载"
             assert 'id="joystick"' in page and 'id="aimJoystick"' in page, "手机双轮盘界面未加载"
             assert 'id="chatToggle"' in page and 'id="chatPanel"' in page and 'id="chatForm"' in page, "折叠聊天界面未加载"
-        async with session.get(f"{base_url}/static/game.js?v=26") as response:
+        async with session.get(f"{base_url}/static/game.js?v=27") as response:
             mobile_script = await response.text()
             assert "visualViewport" in mobile_script and "viewWidth" in mobile_script and "orientationchange" in mobile_script, "动态横屏适配脚本未加载"
             assert "viewScale" in mobile_script and "smoothPositions" in mobile_script and "function visible" in mobile_script, "移动端视野或性能优化未加载"
@@ -122,7 +127,7 @@ async def main():
             assert "beginPredictionHold" in mobile_script and "predictionHoldUntil" in mobile_script, "停止移动防抖校正脚本未加载"
             assert "stateReceivedAt" in mobile_script and "bulletX" in mobile_script and "drawProjectiles(now)" in mobile_script, "子弹帧间预测脚本未加载"
             assert "extrapolatedBulletPosition" in mobile_script, "子弹预测缺少墙体碰撞限制"
-            assert all(marker in mobile_script for marker in ("visualBullet", "aimOrigin", "move_x", "baseLead", "serverMoving", "ws.bufferedAmount")), "移动、停止确认、瞄准或枪口显示优化未加载"
+            assert all(marker in mobile_script for marker in ("visualBullet", "aimOrigin", "move_x", "stop_x", "baseLead", "serverMoving", "ws.bufferedAmount")), "移动、停止对齐、瞄准或枪口显示优化未加载"
 
         first = await session.ws_connect(f"{base_url}/ws")
         second = await session.ws_connect(f"{base_url}/ws")
@@ -131,7 +136,7 @@ async def main():
         first_welcome = json.loads((await first.receive()).data)
         second_welcome = json.loads((await second.receive()).data)
         assert first_welcome["room"] == run_id and second_welcome["room"] == run_id
-        assert first_welcome["protocol"] == 9 and first_welcome["edition"] == "internet" and len(first_welcome["obstacles"]) > 8, "初始地形或压缩协议未发送"
+        assert first_welcome["protocol"] == 10 and first_welcome["edition"] == "internet" and len(first_welcome["obstacles"]) > 8, "初始地形或压缩协议未发送"
         for _ in range(10):
             state = json.loads((await first.receive()).data)
             if state.get("type") == "state" and len(state["players"]) == 2:
@@ -169,7 +174,8 @@ async def main():
                 moved = True
                 break
         assert moved, "服务端没有处理移动输入"
-        await first.send_json({"type": "input", "move_x": 0, "move_y": 0, "angle": 0})
+        stop_target = player["x"]
+        await first.send_json({"type": "input", "move_x": 0, "move_y": 0, "stop_x": stop_target, "stop_y": player["y"], "angle": 0})
         for _ in range(10):
             stopped_state = json.loads((await first.receive()).data)
             stopped_player = next((p for p in stopped_state.get("players", []) if p["name"] == "A"), None)
@@ -177,6 +183,7 @@ async def main():
                 break
         else:
             raise AssertionError("服务器没有确认停止移动")
+        assert abs(stopped_player["x"] - stop_target) < 0.2, "服务器没有对齐客户端停止位置"
         player_color = player["color"]
         owned_bullet = None
         for angle in (0, 1.57, 3.14, -1.57):
@@ -220,7 +227,7 @@ async def main():
         profession = await session.ws_connect(f"{base_url}/ws")
         await profession.send_json({"name": "职业测试", "room": f"R{run_id}", "mode": "profession"})
         profession_welcome = json.loads((await profession.receive()).data)
-        assert profession_welcome["mode"] == "profession" and profession_welcome["protocol"] == 9
+        assert profession_welcome["mode"] == "profession" and profession_welcome["protocol"] == 10
         waiting = json.loads((await profession.receive()).data)
         pro_player = waiting["players"][0]
         assert not pro_player["ready"] and len(waiting["pickups"]) == 1 and waiting["pickups"][0]["kind"] == "health", "职业选择前状态或血包规则错误"
