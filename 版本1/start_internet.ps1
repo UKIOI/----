@@ -14,7 +14,7 @@ $runtimeDir = Join-Path $projectDir ".runtime"
 $serverProcess = $null
 $tunnelProcess = $null
 $ownsServer = $false
-$expectedProtocol = 10
+$expectedProtocol = 12
 $instanceLock = [Threading.Mutex]::new($false, "Local\NeonBrawlInternet$Port")
 $lockTaken = $false
 
@@ -31,7 +31,7 @@ function Get-GameHealth {
 function Test-GameServer {
     param([int]$GamePort)
     $result = Get-GameHealth -GamePort $GamePort
-    return $result -and $result.game -eq "neon-brawl" -and $result.protocol -eq $expectedProtocol
+    return $result -and $result.game -eq "neon-brawl" -and $result.edition -eq "internet" -and $result.protocol -eq $expectedProtocol
 }
 
 function Get-Cloudflared {
@@ -73,7 +73,10 @@ try {
     New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
 
     $existingHealth = Get-GameHealth -GamePort $Port
-    if ($existingHealth -and $existingHealth.game -eq "neon-brawl" -and $existingHealth.protocol -ne $expectedProtocol) {
+    if ($existingHealth -and $existingHealth.game -eq "neon-brawl" -and $existingHealth.edition -eq "local") {
+        throw "端口 $Port 正由本地版使用。请保持本地版运行，并用其他端口启动互联网版，例如：.\start_internet.ps1 -Port 8082"
+    }
+    if ($existingHealth -and $existingHealth.game -eq "neon-brawl" -and $existingHealth.edition -eq "internet" -and $existingHealth.protocol -ne $expectedProtocol) {
         $listener = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $listener) { throw "检测到旧版游戏服务器，但无法确定对应进程，请关闭旧服务器窗口后重试。" }
         Write-Host "检测到协议 $($existingHealth.protocol) 的旧游戏服务器，正在自动升级……" -ForegroundColor Yellow

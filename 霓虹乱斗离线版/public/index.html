@@ -2,12 +2,12 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-  <title>霓虹乱斗</title><link rel="stylesheet" href="/static/style.css?v=11">
+  <title>霓虹乱斗 · 离线版</title><link rel="stylesheet" href="/static/style.css?v=12">
 </head>
 <body>
   <div id="rotateNotice"><div>↻<b>请将手机横屏</b><small>横屏后游戏会自动适配可用画面</small></div></div>
   <main id="menu">
-    <section class="card"><div class="logo">⚡</div><h1>霓虹乱斗</h1><p>实时在线 2D 多人混战</p>
+    <section class="card"><div class="logo">⚡</div><h1>霓虹乱斗</h1><p>仅限本机的离线 2D 混战</p>
       <label>你的昵称<input id="name" maxlength="12" value="玩家"></label>
       <label>房间号<input id="room" maxlength="10" value="PUBLIC"></label>
       <label>玩法模式<select id="mode">
@@ -16,7 +16,7 @@
         <option value="pure">纯净模式 · 无道具</option>
         <option value="profession">职业模式 · 职业技能与血包</option>
       </select></label>
-      <button id="join">加入战斗</button><small>把网址和房间号发给朋友即可联机</small>
+      <button id="join">加入战斗</button><small>离线版只在这台电脑运行，不连接公网或局域网</small>
     </section>
   </main>
   <div id="game" hidden><canvas id="canvas"></canvas><div id="hud"><b id="roomLabel"></b><span id="status">连接中…</span><em id="powerups"></em></div>
@@ -24,6 +24,20 @@
     <div id="joystick" aria-label="移动摇杆"><div id="joystickKnob"></div></div>
     <div id="aimJoystick" aria-label="射击摇杆"><div id="aimJoystickKnob"></div></div>
     <button id="skillButton" hidden>圣盾</button>
+    <button id="botToggle" aria-label="打开人机设置">🤖 人机</button>
+    <section id="botPanel" hidden aria-label="人机设置">
+      <header><b>人机设置</b><button id="botClose" aria-label="关闭人机设置">×</button></header>
+      <label>人机数量 <select id="botCount">
+        <option value="0">0（关闭）</option><option value="1">1</option><option value="2">2</option>
+        <option value="3" selected>3</option><option value="4">4</option><option value="5">5</option>
+        <option value="6">6</option><option value="7">7</option><option value="8">8</option>
+        <option value="9">9</option><option value="10">10</option><option value="11">11</option>
+      </select></label>
+      <label>人机强度 <select id="botDifficulty">
+        <option value="easy">简单</option><option value="normal" selected>普通</option><option value="hard">困难</option>
+      </select></label>
+      <button id="applyBots">应用设置</button><small id="botSummary">当前没有人机</small>
+    </section>
     <button id="chatToggle" aria-label="打开聊天">💬 聊天 <i id="chatUnread" hidden></i></button>
     <section id="chatPanel" hidden aria-label="房间聊天">
       <header><b>房间聊天</b><button id="chatClose" aria-label="关闭聊天">×</button></header>
@@ -39,5 +53,5 @@
       <button data-role="paladin"><b>✧ 圣骑士</b><small>空格：无敌并加速 5 秒</small></button>
     </div></div></section>
   </div>
-  <script src="/static/game.js?v=29"></script>
+  <script src="/static/game.js?v=28"></script>
 </body></html>

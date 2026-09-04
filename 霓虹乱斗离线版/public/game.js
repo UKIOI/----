@@ -10,6 +10,13 @@ const joystickKnob = document.querySelector("#joystickKnob");
 const aimJoystick = document.querySelector("#aimJoystick");
 const aimJoystickKnob = document.querySelector("#aimJoystickKnob");
 const skillButton = document.querySelector("#skillButton");
+const botToggle = document.querySelector("#botToggle");
+const botPanel = document.querySelector("#botPanel");
+const botClose = document.querySelector("#botClose");
+const botCount = document.querySelector("#botCount");
+const botDifficulty = document.querySelector("#botDifficulty");
+const applyBots = document.querySelector("#applyBots");
+const botSummary = document.querySelector("#botSummary");
 const chatToggle = document.querySelector("#chatToggle");
 const chatUnread = document.querySelector("#chatUnread");
 const chatPanel = document.querySelector("#chatPanel");
@@ -28,7 +35,6 @@ const POWERUPS = {
   cannon: { icon: "●", name: "攻城大炮", color: "#ff7b39" }, minion: { icon: "◉", name: "战斗随从", color: "#72f1d0" },
   invincible: { icon: "✧", name: "神圣无敌", color: "#ffe17a" },
 };
-const PROTOCOL_VERSION = 12;
 let ws, myId = null, requestedMode = "classic", world = { width: 1600, height: 900 };
 let state = { players: [], bullets: [], lasers: [], explosions: [], pickups: [], obstacles: [] };
 let keys = {}, mouse = { x: 0, y: 0, down: false }, touchMove = { x: 0, y: 0 }, touchAim = { x: 1, y: 0, active: false };
@@ -38,7 +44,7 @@ const viewScale = mobileMode ? .72 : 1;
 let camera = { x: 0, y: 0 }, lastSend = 0, receivedState = false, stateReceivedAt = performance.now();
 let unreadChats = 0;
 let predictedSelf = null, lastFrame = performance.now(), lastPing = 0, latency = null;
-let predictionBlocked = false, inputSequence = 0, lastStopSequence = -1, lastSentMoving = false;
+let predictionWasMoving = false, predictionHoldUntil = 0, predictionBlocked = false;
 let viewWidth = innerWidth, viewHeight = innerHeight, sceneWidth = innerWidth / viewScale, sceneHeight = innerHeight / viewScale;
 const speedTrails = new Map();
 const smoothPositions = new Map();
@@ -65,12 +71,12 @@ function connect() {
   ws.onmessage = event => {
     const data = JSON.parse(event.data);
     if (data.type === "welcome") {
-      if (data.protocol !== PROTOCOL_VERSION || data.mode !== requestedMode) {
+      if (data.protocol !== 11 || data.mode !== requestedMode) {
         alert("客户端与服务器版本不一致，请重启服务器并强制刷新页面");
         ws.close();
         return;
       }
-      myId = data.id; world = data; state.obstacles = data.obstacles || []; predictedSelf = null; inputSequence = 0; lastStopSequence = -1; lastSentMoving = false; lastPing = 0; menu.hidden = true; game.hidden = false; canvas.tabIndex = 0; canvas.focus();
+      myId = data.id; world = data; state.obstacles = data.obstacles || []; predictedSelf = null; predictionWasMoving = false; predictionHoldUntil = 0; lastPing = 0; menu.hidden = true; game.hidden = false; canvas.tabIndex = 0; canvas.focus();
       document.querySelector("#roomLabel").textContent = `房间 ${data.room} · ${MODE_NAMES[data.mode]}`;
       statusLabel.textContent = data.mode === "profession" ? "请选择职业" : "正在载入战场…";
       rolePanel.hidden = data.mode !== "profession";
@@ -83,8 +89,9 @@ function connect() {
       const isPaladin = me?.ready && me.role === "paladin";
       skillButton.hidden = !isPaladin;
       if (isPaladin) { skillButton.disabled = me.ability_cooldown > 0; skillButton.textContent = me.ability_cooldown > 0 ? `圣盾 ${Math.ceil(me.ability_cooldown)}s` : "圣盾"; }
-      const pingText = latency === null ? "" : ` · ${latency}ms`;
-      statusLabel.textContent = me && !me.ready ? "请选择职业" : `${me?.role ? ROLE_NAMES[me.role] + " · " : ""}已连接 · ${data.players.length} 人在线${pingText}`; updatePowerLabel();
+      const pingText = latency === null ? "" : ` · ${latency}ms`, botTotal = data.bot_count || 0;
+      botSummary.textContent = botTotal ? `当前 ${botTotal} 个人机 · ${{ easy: "简单", normal: "普通", hard: "困难" }[data.bot_difficulty] || "普通"}` : "当前没有人机";
+      statusLabel.textContent = me && !me.ready ? "请选择职业" : `${me?.role ? ROLE_NAMES[me.role] + " · " : ""}已连接 · ${botTotal} 个人机${pingText}`; updatePowerLabel();
     } else if (data.type === "pong") {
       const sample = performance.now() - Number(data.sent);
       if (Number.isFinite(sample) && sample >= 0) latency = Math.round(latency === null ? sample : latency * .7 + sample * .3);
@@ -105,12 +112,12 @@ skillButton.addEventListener("pointerdown", event => {
 });
 function stopGameInput() {
   keys = {}; mouse.down = false; touchMove.x = 0; touchMove.y = 0; touchAim.active = false;
-  movePointer = null; aimPointer = null;
   joystickKnob.style.left = "50%"; joystickKnob.style.top = "50%";
   aimJoystickKnob.style.left = "50%"; aimJoystickKnob.style.top = "50%";
   sendInput(performance.now(), true);
 }
 function openChat() {
+  botPanel.hidden = true; botToggle.hidden = false;
   chatPanel.hidden = false; chatToggle.hidden = true; unreadChats = 0; chatUnread.hidden = true;
   stopGameInput(); setTimeout(() => chatInput.focus(), 0);
 }
@@ -135,6 +142,17 @@ chatForm.addEventListener("submit", event => {
 });
 chatInput.addEventListener("keydown", event => { event.stopPropagation(); if (event.key === "Escape") { event.preventDefault(); closeChatPanel(); } });
 chatInput.addEventListener("keyup", event => event.stopPropagation());
+function openBotPanel() { chatPanel.hidden = true; chatToggle.hidden = false; botPanel.hidden = false; botToggle.hidden = true; stopGameInput(); }
+function closeBotPanel() { botPanel.hidden = true; botToggle.hidden = false; canvas.focus({ preventScroll: true }); }
+botToggle.addEventListener("click", openBotPanel);
+botClose.addEventListener("click", closeBotPanel);
+botPanel.addEventListener("keydown", event => event.stopPropagation());
+botPanel.addEventListener("keyup", event => event.stopPropagation());
+applyBots.addEventListener("click", () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "configure_bots", count: Number(botCount.value), difficulty: botDifficulty.value }));
+  closeBotPanel();
+});
 function updatePowerLabel() {
   const me = state.players.find(player => player.id === myId), effects = Object.entries(me?.effects || {});
   const labels = effects.map(([kind, seconds]) => { const effect = POWERUPS[kind] || { icon: "◆", name: kind }; return `${effect.icon} ${effect.name} ${seconds.toFixed(1)}s`; });
@@ -147,7 +165,6 @@ const KEY_CODES = { KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d", ArrowUp: "arrowu
 function updateKey(event, pressed) {
   if (event.target.matches?.("input, textarea, select")) return;
   const key = KEY_CODES[event.code] || event.key.toLowerCase();
-  if (pressed && event.repeat) { if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(key)) event.preventDefault(); return; }
   keys[key] = pressed;
   if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(key)) {
     event.preventDefault();
@@ -156,8 +173,7 @@ function updateKey(event, pressed) {
 }
 addEventListener("keydown", event => { updateKey(event, true); if (event.code === "Escape" || event.key === "Escape") { ws?.close(); location.reload(); } });
 addEventListener("keyup", event => updateKey(event, false));
-addEventListener("blur", stopGameInput);
-document.addEventListener("visibilitychange", () => { if (document.hidden) stopGameInput(); });
+addEventListener("blur", () => { keys = {}; mouse.down = false; touchMove.x = 0; touchMove.y = 0; touchAim.active = false; sendInput(performance.now(), true); });
 canvas.addEventListener("pointermove", event => {
   if (event.pointerType !== "touch") { mouse.x = event.clientX; mouse.y = event.clientY; }
 });
@@ -219,19 +235,17 @@ aimJoystick.addEventListener("pointerup", resetAimJoystick); aimJoystick.addEven
 addEventListener("pointerup", event => { resetJoystick(event); resetAimJoystick(event); });
 addEventListener("pointercancel", event => { resetJoystick(event); resetAimJoystick(event); });
 function sendInput(now = performance.now(), force = false) {
-  if (!ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > (force ? 1048576 : 65536) || (!force && now - lastSend < 33)) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN || (!force && (now - lastSend < 33 || ws.bufferedAmount > 65536))) return; lastSend = now;
   const me = state.players.find(player => player.id === myId); if (!me) return;
   if (requestedMode === "profession" && me.ready !== true) return;
   const movement = currentMoveVector(), aimOrigin = predictedSelf || me, canvasRect = canvas.getBoundingClientRect();
   const screenX = canvasRect.left + (aimOrigin.x - camera.x) * viewScale, screenY = canvasRect.top + (aimOrigin.y - camera.y) * viewScale;
   const angle = touchAim.active ? Math.atan2(touchAim.y, touchAim.x) : Math.atan2(mouse.y - screenY, mouse.x - screenX);
-  const sequence = ++inputSequence;
-  if (lastSentMoving && !movement.moving) lastStopSequence = sequence;
-  lastSentMoving = movement.moving; lastSend = now;
-  ws.send(JSON.stringify({ type: "input", seq: sequence,
+  ws.send(JSON.stringify({ type: "input",
     up: keys.w || keys.arrowup || touchMove.y < -.18, down: keys.s || keys.arrowdown || touchMove.y > .18,
     left: keys.a || keys.arrowleft || touchMove.x < -.18, right: keys.d || keys.arrowright || touchMove.x > .18,
-    move_x: movement.x, move_y: movement.y,
+    move_x: movement.x, move_y: movement.y, stop_x: movement.moving ? undefined : aimOrigin.x,
+    stop_y: movement.moving ? undefined : aimOrigin.y,
     shoot: mouse.down || touchAim.active, ability: Boolean(keys[" "]), angle }));
 }
 function visible(x, y, width = 0, height = 0, margin = 70) {
@@ -247,8 +261,13 @@ function currentMoveVector() {
   const strength = Math.min(1, (length - .12) / .88);
   return { x: x / length * strength, y: y / length * strength, moving: true };
 }
+function beginPredictionHold(now = performance.now()) {
+  predictionWasMoving = false;
+  const local = world.edition === "local" || world.edition === "offline";
+  predictionHoldUntil = now + (local ? 55 : Math.min(180, Math.max(75, (latency ?? 140) * .5 + 30)));
+}
 function reconcilePrediction(me) {
-  if (!me?.ready || me.hp <= 0) { predictedSelf = null; lastStopSequence = -1; lastSentMoving = false; return; }
+  if (!me?.ready || me.hp <= 0) { predictedSelf = null; predictionWasMoving = false; predictionHoldUntil = 0; return; }
   const error = predictedSelf ? Math.hypot(predictedSelf.x - me.x, predictedSelf.y - me.y) : Infinity;
   if (!predictedSelf || error > 260) {
     predictedSelf = { x: me.x, y: me.y }; return;
@@ -263,21 +282,23 @@ function predictedCircleHitsRect(x, y, radius, obstacle) {
 function updateLocalPrediction(now) {
   const dt = Math.min(Math.max(0, now - lastFrame) / 1000, .05); lastFrame = now;
   const me = state.players.find(player => player.id === myId);
-  if (!me?.ready || me.hp <= 0) { predictedSelf = null; lastStopSequence = -1; lastSentMoving = false; return; }
+  if (!me?.ready || me.hp <= 0) { predictedSelf = null; predictionWasMoving = false; predictionHoldUntil = 0; return; }
   if (!predictedSelf) predictedSelf = { x: me.x, y: me.y };
   const movement = currentMoveVector();
   const speed = 300 * (me.effects?.speed ? 1.45 : 1), radius = 25;
   predictionBlocked = false;
   if (movement.moving) {
+    predictionWasMoving = true; predictionHoldUntil = 0;
     const nextX = Math.max(radius, Math.min(world.width - radius, predictedSelf.x + movement.x * speed * dt));
     if (!(state.obstacles || []).some(obstacle => predictedCircleHitsRect(nextX, predictedSelf.y, radius, obstacle))) predictedSelf.x = nextX; else predictionBlocked = true;
     const nextY = Math.max(radius, Math.min(world.height - radius, predictedSelf.y + movement.y * speed * dt));
     if (!(state.obstacles || []).some(obstacle => predictedCircleHitsRect(predictedSelf.x, nextY, radius, obstacle))) predictedSelf.y = nextY; else predictionBlocked = true;
-  }
-  if (!movement.moving && lastStopSequence >= 0 && (me.input_seq ?? -1) < lastStopSequence) return;
-  const stateAge = Math.max(0, now - stateReceivedAt) / 1000;
-  const baseLead = Math.min(.16, Math.max(.025, (latency ?? 140) / 2000));
-  const lead = movement.moving ? Math.min(.2, baseLead + stateAge) : 0;
+  } else if (predictionWasMoving) beginPredictionHold(now);
+  const serverMoving = Math.hypot(me.move_x || 0, me.move_y || 0) > .01;
+  if (!movement.moving && (now < predictionHoldUntil || serverMoving)) return;
+  const local = world.edition === "local" || world.edition === "offline", stateAge = Math.max(0, now - stateReceivedAt) / 1000;
+  const baseLead = local ? 0 : Math.min(.14, Math.max(.035, (latency ?? 140) / 2000 + 1 / (world.network_rate || 25)));
+  const lead = movement.moving ? (local ? 0 : Math.min(.19, baseLead + stateAge)) : 0;
   let targetX = me.x, targetY = me.y;
   const targetNextX = Math.max(radius, Math.min(world.width - radius, targetX + movement.x * speed * lead));
   if (!(state.obstacles || []).some(obstacle => predictedCircleHitsRect(targetNextX, targetY, radius, obstacle))) targetX = targetNextX;
@@ -286,30 +307,9 @@ function updateLocalPrediction(now) {
   const errorX = targetX - predictedSelf.x, errorY = targetY - predictedSelf.y, error = Math.hypot(errorX, errorY);
   if (error > 260) { predictedSelf.x = targetX; predictedSelf.y = targetY; return; }
   if (error < .15) return;
-  if (!movement.moving) {
-    if (error <= 10) { predictedSelf.x = targetX; predictedSelf.y = targetY; return; }
-    const step = Math.min(error * (1 - Math.exp(-12 * dt)), 240 * dt);
-    predictedSelf.x += errorX / error * step; predictedSelf.y += errorY / error * step;
-    return;
-  }
-  if (predictionBlocked) {
-    const step = Math.min(error * (1 - Math.exp(-12 * dt)), 300 * dt);
-    predictedSelf.x += errorX / error * step; predictedSelf.y += errorY / error * step;
-    return;
-  }
-  // 横向误差快速修正；前进方向保留一小段容差，避免网络状态帧让速度忽快忽慢。
-  const parallel = errorX * movement.x + errorY * movement.y;
-  const perpendicularX = errorX - parallel * movement.x, perpendicularY = errorY - parallel * movement.y;
-  const perpendicularLength = Math.hypot(perpendicularX, perpendicularY);
-  if (perpendicularLength > .15) {
-    const step = Math.min(perpendicularLength * (1 - Math.exp(-10 * dt)), 180 * dt);
-    predictedSelf.x += perpendicularX / perpendicularLength * step; predictedSelf.y += perpendicularY / perpendicularLength * step;
-  }
-  const excess = Math.max(0, Math.abs(parallel) - 32) * Math.sign(parallel);
-  if (excess) {
-    const step = Math.sign(excess) * Math.min(Math.abs(excess) * (1 - Math.exp(-2.5 * dt)), 55 * dt);
-    predictedSelf.x += movement.x * step; predictedSelf.y += movement.y * step;
-  }
+  const alpha = 1 - Math.exp(-(local ? 11 : predictionBlocked ? 12 : 7) * dt);
+  const maxStep = (local ? 440 : predictionBlocked ? 440 : 300) * dt, step = Math.min(error * alpha, maxStep);
+  predictedSelf.x += errorX / error * step; predictedSelf.y += errorY / error * step;
 }
 function updateLatency(now) {
   if (!ws || ws.readyState !== WebSocket.OPEN || now - lastPing < 2000) return;
