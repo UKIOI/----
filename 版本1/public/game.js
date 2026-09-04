@@ -17,8 +17,28 @@ const chatClose = document.querySelector("#chatClose");
 const chatMessages = document.querySelector("#chatMessages");
 const chatForm = document.querySelector("#chatForm");
 const chatInput = document.querySelector("#chatInput");
-const MODE_NAMES = { classic: "经典模式", items: "多道具模式", pure: "纯净模式", profession: "职业模式" };
+const soundToggle = document.querySelector("#soundToggle");
+const roomBrowser = document.querySelector("#roomBrowser");
+const roomBrowserToggle = document.querySelector("#roomBrowserToggle");
+const roomBrowserClose = document.querySelector("#roomBrowserClose");
+const roomList = document.querySelector("#roomList");
+const roomRefresh = document.querySelector("#roomRefresh");
+const guidePanel = document.querySelector("#guidePanel");
+const guideToggle = document.querySelector("#guideToggle");
+const guideClose = document.querySelector("#guideClose");
+const upgradePanel = document.querySelector("#upgrades");
+const upgradeProgress = document.querySelector("#upgradeProgress");
+const upgradeChoices = document.querySelector("#upgradeChoices");
+const MODE_NAMES = { classic: "经典模式", items: "多道具模式", pure: "纯净模式", profession: "职业模式", upgrade: "升级模式", bio: "生化模式" };
 const ROLE_NAMES = { tank: "坦克", mage: "法师", sniper: "狙击手", necromancer: "死灵法师", weaponmaster: "武器大师", paladin: "圣骑士" };
+const UPGRADE_INFO = {
+  vitality: { icon: "♥", name: "生命强化", text: "最大生命 +15，并恢复 15 点", max: 3 },
+  power: { icon: "◆", name: "火力强化", text: "子弹伤害 +10%", max: 3 },
+  haste: { icon: "⚡", name: "快速装填", text: "射击间隔缩短 10%", max: 3 },
+  agility: { icon: "➤", name: "机动强化", text: "移动速度 +6%", max: 3 },
+  velocity: { icon: "»", name: "高速弹药", text: "子弹速度 +10%", max: 3 },
+  arsenal: { icon: "✦", name: "武器扩展", text: "解锁双发，之后升级为三发", max: 2 },
+};
 const POWERUPS = {
   damage: { icon: "⚔", name: "强化伤害", color: "#ff5d73" }, rapid: { icon: "⚡", name: "高速射击", color: "#ffd166" },
   multishot: { icon: "✦", name: "三重子弹", color: "#64a8ff" }, laser: { icon: "▰", name: "半血激光", color: "#c77dff" },
@@ -28,30 +48,40 @@ const POWERUPS = {
   cannon: { icon: "●", name: "攻城大炮", color: "#ff7b39" }, minion: { icon: "◉", name: "战斗随从", color: "#72f1d0" },
   invincible: { icon: "✧", name: "神圣无敌", color: "#ffe17a" },
 };
-const PROTOCOL_VERSION = 13;
+const PROTOCOL_VERSION = 16;
+const BUILD_VERSION = 43;
 let ws, myId = null, requestedMode = "classic", world = { width: 1600, height: 900 };
-let state = { players: [], bullets: [], lasers: [], explosions: [], pickups: [], obstacles: [] };
+let state = { players: [], bullets: [], lasers: [], explosions: [], pickups: [], obstacles: [], zombies: [], bio: null };
 let keys = {}, mouse = { x: 0, y: 0, down: false }, touchMove = { x: 0, y: 0 }, touchAim = { x: 1, y: 0, active: false };
 let movePointer = null, aimPointer = null;
 const mobileUserAgent = navigator.userAgentData?.mobile === true || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|HarmonyOS|Mobile/i.test(navigator.userAgent);
 const ipadLike = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
 const mobileMode = mobileUserAgent || ipadLike;
 document.documentElement.classList.toggle("mobile-controls", mobileMode);
-const viewScale = mobileMode ? .72 : 1;
+let viewScale = mobileMode ? (innerHeight > innerWidth ? .62 : .72) : 1;
 let camera = { x: 0, y: 0 }, lastSend = 0, receivedState = false, stateReceivedAt = performance.now();
 let unreadChats = 0;
 let predictedSelf = null, lastFrame = performance.now(), lastPing = 0, latency = null;
 let predictionBlocked = false, inputSequence = 0, lastStopSequence = -1, lastSentMoving = false;
 let viewWidth = innerWidth, viewHeight = innerHeight, sceneWidth = innerWidth / viewScale, sceneHeight = innerHeight / viewScale;
 const speedTrails = new Map();
+const speedTrailAnchors = new Map();
 const motionTracks = new Map();
-const REMOTE_INTERPOLATION_MS = 85;
-const REMOTE_EXTRAPOLATION_MS = 45;
+const REMOTE_INTERPOLATION_MS = 140;
+const REMOTE_EXTRAPOLATION_MS = 80;
+const BULLET_EXTRAPOLATION_MS = 220;
 let serverClockOffset = null;
+let audioContext = null, soundSnapshotReady = false;
+let soundEnabled = (() => { try { return localStorage.getItem("neon-sound") !== "off"; } catch { return true; } })();
+const soundCooldowns = new Map(), heardExplosions = new Map();
+let roomRefreshTimer = 0;
+let lastUpgradeSignature = "";
+const exploredBioCells = new Set();
 function resize() {
   const viewport = window.visualViewport;
   const ratio = Math.min(devicePixelRatio || 1, mobileMode ? 1.5 : 2);
   viewWidth = Math.round(viewport?.width || innerWidth); viewHeight = Math.round(viewport?.height || innerHeight);
+  viewScale = mobileMode ? (viewHeight > viewWidth ? .62 : .72) : 1;
   sceneWidth = viewWidth / viewScale; sceneHeight = viewHeight / viewScale;
   canvas.style.width = `${viewWidth}px`; canvas.style.height = `${viewHeight}px`;
   canvas.width = Math.round(viewWidth * ratio); canvas.height = Math.round(viewHeight * ratio);
@@ -62,7 +92,50 @@ function resize() {
 addEventListener("resize", resize); addEventListener("orientationchange", () => setTimeout(resize, 150));
 window.visualViewport?.addEventListener("resize", resize); resize();
 document.querySelector("#join").onclick = connect;
+function closeRoomBrowser() {
+  roomBrowser.hidden = true; clearTimeout(roomRefreshTimer); roomRefreshTimer = 0;
+}
+async function refreshRoomBrowser() {
+  clearTimeout(roomRefreshTimer); roomRefresh.disabled = true; roomRefresh.textContent = "刷新中…";
+  try {
+    const response = await fetch("/rooms", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json(); roomList.replaceChildren();
+    if (!data.rooms?.length) {
+      const empty = document.createElement("p"); empty.className = "room-empty"; empty.textContent = "目前还没有房间，可以创建第一个房间"; roomList.append(empty);
+    } else for (const room of data.rooms) {
+      const row = document.createElement("article"), code = document.createElement("b"), mode = document.createElement("span"), count = document.createElement("span"), choose = document.createElement("button");
+      row.className = "room-row"; code.className = "room-code"; mode.className = "room-mode"; count.className = "room-count";
+      code.textContent = room.code; mode.textContent = MODE_NAMES[room.mode] || room.mode;
+      count.textContent = `${room.players}/${room.capacity} 真人${room.bots ? ` · ${room.bots} 人机` : ""}`;
+      choose.type = "button"; choose.disabled = room.players >= room.capacity; choose.textContent = choose.disabled ? "已满" : "选择";
+      choose.addEventListener("click", () => {
+        document.querySelector("#room").value = room.code; document.querySelector("#mode").value = room.mode;
+        playEffect("ui"); closeRoomBrowser();
+      });
+      row.append(code, mode, count, choose); roomList.append(row);
+    }
+  } catch {
+    roomList.replaceChildren(); const failed = document.createElement("p"); failed.className = "room-empty"; failed.textContent = "房间列表读取失败，请检查服务器连接后重试"; roomList.append(failed);
+  } finally {
+    roomRefresh.disabled = false; roomRefresh.textContent = "刷新列表";
+    if (!roomBrowser.hidden) roomRefreshTimer = setTimeout(refreshRoomBrowser, 3000);
+  }
+}
+function openRoomBrowser() {
+  playEffect("ui"); roomBrowser.hidden = false; refreshRoomBrowser();
+}
+roomBrowserToggle.addEventListener("click", openRoomBrowser);
+roomBrowserClose.addEventListener("click", () => { playEffect("ui"); closeRoomBrowser(); });
+roomRefresh.addEventListener("click", refreshRoomBrowser);
+roomBrowser.addEventListener("click", event => { if (event.target === roomBrowser) closeRoomBrowser(); });
+function closeGuide() { guidePanel.hidden = true; }
+function openGuide() { playEffect("ui"); guidePanel.hidden = false; }
+guideToggle.addEventListener("click", openGuide);
+guideClose.addEventListener("click", () => { playEffect("ui"); closeGuide(); });
+guidePanel.addEventListener("click", event => { if (event.target === guidePanel) closeGuide(); });
 function connect() {
+  ensureAudio(); playEffect("ui");
   document.querySelector("#join").disabled = true;
   requestedMode = document.querySelector("#mode").value;
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
@@ -71,26 +144,40 @@ function connect() {
   ws.onmessage = event => {
     const data = JSON.parse(event.data);
     if (data.type === "welcome") {
-      if (data.protocol !== PROTOCOL_VERSION || data.mode !== requestedMode) {
-        alert("客户端与服务器版本不一致，请重启服务器并强制刷新页面");
+      if (data.protocol !== PROTOCOL_VERSION) {
+        const refreshKey = `neon-protocol-refresh-${data.protocol}`, lastRefresh = Number(sessionStorage.getItem(refreshKey) || 0);
+        ws.close();
+        if (Date.now() - lastRefresh > 15000) {
+          sessionStorage.setItem(refreshKey, String(Date.now()));
+          const freshUrl = new URL(location.href); freshUrl.searchParams.set("refresh", String(Date.now())); location.replace(freshUrl);
+        } else alert("客户端仍未更新，请关闭全部游戏页面后重新打开");
+        return;
+      }
+      if (data.build !== BUILD_VERSION) {
+        alert("主机仍在运行旧版服务器，请主机关闭原启动窗口，然后重新运行 start_internet.bat");
         ws.close();
         return;
       }
-      myId = data.id; world = data; state.obstacles = data.obstacles || []; predictedSelf = null; motionTracks.clear(); serverClockOffset = null; inputSequence = 0; lastStopSequence = -1; lastSentMoving = false; lastPing = 0; menu.hidden = true; game.hidden = false; canvas.tabIndex = 0; canvas.focus();
+      if (data.mode !== requestedMode) {
+        alert("该房间已使用其他玩法模式，请返回房间列表重新选择"); ws.close(); return;
+      }
+      myId = data.id; world = data; state.obstacles = data.obstacles || []; predictedSelf = null; motionTracks.clear(); speedTrails.clear(); speedTrailAnchors.clear(); heardExplosions.clear(); exploredBioCells.clear(); soundSnapshotReady = false; serverClockOffset = null; inputSequence = 0; lastStopSequence = -1; lastSentMoving = false; lastPing = 0; menu.hidden = true; game.hidden = false; canvas.tabIndex = 0; canvas.focus();
       document.querySelector("#roomLabel").textContent = `房间 ${data.room} · ${MODE_NAMES[data.mode]}`;
       statusLabel.textContent = data.mode === "profession" ? "请选择职业" : "正在载入战场…";
-      rolePanel.hidden = data.mode !== "profession";
+      rolePanel.hidden = data.mode !== "profession"; upgradePanel.hidden = true; lastUpgradeSignature = "";
     } else if (data.type === "state") {
       const receivedAt = performance.now(), destroyed = new Map(data.destroyed || []);
       data.obstacles = (state.obstacles || []).map(obstacle => ({ ...obstacle, active: !destroyed.has(obstacle.id), restore: destroyed.get(obstacle.id) || 0 }));
       reconcilePrediction(data.players.find(player => player.id === myId));
-      recordMotionSnapshots(data, synchronizedSnapshotTime(data.server_time, receivedAt)); recordSpeedTrails(data.players); state = data; stateReceivedAt = receivedAt; receivedState = true; const me = data.players.find(player => player.id === myId);
+      recordMotionSnapshots(data, synchronizedSnapshotTime(data.server_time, receivedAt)); playStateSounds(state, data, receivedAt); state = data; stateReceivedAt = receivedAt; receivedState = true; const me = data.players.find(player => player.id === myId);
       if (requestedMode === "profession") rolePanel.hidden = me?.ready === true;
+      updateUpgradePanel(me);
       const isPaladin = me?.ready && me.role === "paladin";
       skillButton.hidden = !isPaladin;
       if (isPaladin) { skillButton.disabled = me.ability_cooldown > 0; skillButton.textContent = me.ability_cooldown > 0 ? `圣盾 ${Math.ceil(me.ability_cooldown)}s` : "圣盾"; }
       const pingText = latency === null ? "" : ` · ${latency}ms`;
-      statusLabel.textContent = me && !me.ready ? "请选择职业" : `${me?.role ? ROLE_NAMES[me.role] + " · " : ""}已连接 · ${data.players.length} 人在线${pingText}`; updatePowerLabel();
+      const levelText = ["upgrade", "bio"].includes(requestedMode) && me ? ` · Lv.${me.level} 经验 ${me.xp}/${me.next_level_score ?? "满级"}` : "";
+      statusLabel.textContent = me && !me.ready ? "请选择职业" : `${me?.role ? ROLE_NAMES[me.role] + " · " : ""}已连接 · ${data.players.length} 人在线${levelText}${pingText}`; updatePowerLabel();
     } else if (data.type === "pong") {
       const sample = performance.now() - Number(data.sent);
       if (Number.isFinite(sample) && sample >= 0) latency = Math.round(latency === null ? sample : latency * .7 + sample * .3);
@@ -102,13 +189,32 @@ function connect() {
   ws.onclose = () => { statusLabel.textContent = "连接断开，请刷新重试"; document.querySelector("#join").disabled = false; };
 }
 document.querySelectorAll("[data-role]").forEach(button => button.onclick = () => {
+  playEffect("ui");
   ws?.send(JSON.stringify({ type: "select_role", role: button.dataset.role }));
   statusLabel.textContent = "正在进入战场…";
 });
 skillButton.addEventListener("pointerdown", event => {
   event.preventDefault();
-  if (!skillButton.disabled) ws?.send(JSON.stringify({ type: "ability" }));
+  if (!skillButton.disabled) { playEffect("shield"); ws?.send(JSON.stringify({ type: "ability" })); }
 });
+function updateUpgradePanel(me) {
+  const choices = ["upgrade", "bio"].includes(requestedMode) ? me?.upgrade_choices || [] : [];
+  if (!choices.length) { upgradePanel.hidden = true; lastUpgradeSignature = ""; return; }
+  const signature = `${me.level}:${choices.join(",")}`;
+  if (signature === lastUpgradeSignature) return;
+  const wasHidden = upgradePanel.hidden; lastUpgradeSignature = signature; upgradeChoices.replaceChildren();
+  upgradeProgress.textContent = `已升至 Lv.${me.level}，选择一项永久强化`;
+  for (const kind of choices) {
+    const info = UPGRADE_INFO[kind], rank = me.upgrades?.[kind] || 0, button = document.createElement("button");
+    const title = document.createElement("b"), detail = document.createElement("small"), level = document.createElement("em");
+    title.textContent = `${info.icon} ${info.name}`; detail.textContent = info.text; level.textContent = `当前 ${rank}/${info.max} → ${rank + 1}/${info.max}`;
+    button.append(title, detail, level);
+    button.addEventListener("click", () => { playEffect("pickup"); button.disabled = true; ws?.send(JSON.stringify({ type: "select_upgrade", upgrade: kind })); upgradePanel.hidden = true; });
+    upgradeChoices.append(button);
+  }
+  upgradePanel.hidden = false;
+  if (wasHidden) stopGameInput();
+}
 function stopGameInput() {
   keys = {}; mouse.down = false; touchMove.x = 0; touchMove.y = 0; touchAim.active = false;
   movePointer = null; aimPointer = null;
@@ -117,20 +223,20 @@ function stopGameInput() {
   sendInput(performance.now(), true);
 }
 function openChat() {
-  chatPanel.hidden = false; chatToggle.hidden = true; unreadChats = 0; chatUnread.hidden = true;
+  playEffect("ui"); chatPanel.hidden = false; chatToggle.hidden = true; unreadChats = 0; chatUnread.hidden = true; chatUnread.textContent = "0"; chatToggle.setAttribute("aria-label", "打开聊天");
   stopGameInput(); setTimeout(() => chatInput.focus(), 0);
 }
 function closeChatPanel() {
-  chatPanel.hidden = true; chatToggle.hidden = false; chatInput.blur(); canvas.focus({ preventScroll: true });
+  playEffect("ui"); chatPanel.hidden = true; chatToggle.hidden = false; chatInput.blur(); canvas.focus({ preventScroll: true });
 }
 function appendChatMessage(data) {
   chatMessages.querySelector(".chat-tip")?.remove();
   const line = document.createElement("p"), name = document.createElement("b"), message = document.createElement("span");
-  line.className = "chat-message"; name.textContent = `${data.name}:`; name.style.color = data.color; message.textContent = data.message;
+  line.className = "chat-message"; name.textContent = `${data.level ? `[Lv.${data.level}] ` : ""}${data.name}:`; name.style.color = data.color; message.textContent = data.message;
   line.append(name, message); chatMessages.append(line);
   while (chatMessages.children.length > 60) chatMessages.firstElementChild.remove();
   chatMessages.scrollTop = chatMessages.scrollHeight;
-  if (chatPanel.hidden) { unreadChats += 1; chatUnread.hidden = false; chatUnread.title = `${unreadChats} 条未读消息`; }
+  if (chatPanel.hidden) { unreadChats += 1; chatUnread.textContent = unreadChats > 9 ? "9+" : String(unreadChats); chatUnread.hidden = false; chatUnread.title = `${unreadChats} 条未读消息`; chatToggle.setAttribute("aria-label", `打开聊天，${unreadChats} 条未读消息`); playEffect("chat"); }
 }
 chatToggle.addEventListener("click", openChat);
 chatClose.addEventListener("click", closeChatPanel);
@@ -141,13 +247,87 @@ chatForm.addEventListener("submit", event => {
 });
 chatInput.addEventListener("keydown", event => { event.stopPropagation(); if (event.key === "Escape") { event.preventDefault(); closeChatPanel(); } });
 chatInput.addEventListener("keyup", event => event.stopPropagation());
+function ensureAudio() {
+  if (!soundEnabled) return null;
+  const AudioEngine = window.AudioContext || window.webkitAudioContext;
+  if (!AudioEngine) return null;
+  if (!audioContext) audioContext = new AudioEngine();
+  if (audioContext.state === "suspended") audioContext.resume().catch(() => {});
+  return audioContext;
+}
+function tone(frequency, endFrequency, duration, type, volume, delay = 0) {
+  const audio = ensureAudio(); if (!audio) return;
+  const start = audio.currentTime + delay, oscillator = audio.createOscillator(), gain = audio.createGain();
+  oscillator.type = type; oscillator.frequency.setValueAtTime(Math.max(20, frequency), start);
+  oscillator.frequency.exponentialRampToValueAtTime(Math.max(20, endFrequency), start + duration);
+  gain.gain.setValueAtTime(.0001, start); gain.gain.exponentialRampToValueAtTime(Math.max(.0002, volume), start + .008);
+  gain.gain.exponentialRampToValueAtTime(.0001, start + duration);
+  oscillator.connect(gain); gain.connect(audio.destination); oscillator.start(start); oscillator.stop(start + duration + .02);
+}
+function playEffect(kind, strength = 1) {
+  if (!soundEnabled) return;
+  const now = performance.now(), minimumGap = kind === "shot" ? 42 : kind === "explosion" ? 100 : 25;
+  if (now - (soundCooldowns.get(kind) || 0) < minimumGap) return;
+  soundCooldowns.set(kind, now); const volume = Math.max(.012, Math.min(.11, strength * .07));
+  if (kind === "shot") tone(260, 125, .055, "square", volume * .42);
+  else if (kind === "sniper") tone(720, 190, .11, "sawtooth", volume * .55);
+  else if (kind === "cannon") { tone(105, 38, .2, "sawtooth", volume); tone(62, 32, .24, "square", volume * .35); }
+  else if (kind === "magic") tone(430, 150, .13, "triangle", volume * .7);
+  else if (kind === "laser") tone(980, 230, .14, "sawtooth", volume * .48);
+  else if (kind === "explosion") { tone(88, 28, .28, "sawtooth", volume); tone(180, 48, .16, "square", volume * .35); }
+  else if (kind === "hurt") tone(165, 68, .16, "square", volume * .8);
+  else if (kind === "death") tone(260, 38, .42, "sawtooth", volume);
+  else if (kind === "pickup") { tone(480, 880, .12, "sine", volume * .65); tone(720, 1180, .12, "sine", volume * .45, .07); }
+  else if (kind === "shield") { tone(330, 660, .18, "sine", volume * .55); tone(500, 1000, .2, "sine", volume * .4, .05); }
+  else if (kind === "chat") { tone(740, 920, .08, "sine", volume * .38); tone(920, 1120, .09, "sine", volume * .3, .07); }
+  else if (kind === "ui") tone(420, 520, .045, "sine", volume * .24);
+}
+function effectVolume(x, y, snapshot) {
+  const me = snapshot.players?.find(player => player.id === myId);
+  if (!me || !Number.isFinite(x) || !Number.isFinite(y)) return .65;
+  return Math.max(.14, 1 - Math.hypot(x - me.x, y - me.y) / 1250);
+}
+function playStateSounds(previous, next, receivedAt) {
+  if (!soundSnapshotReady) { soundSnapshotReady = true; return; }
+  const oldMe = previous.players?.find(player => player.id === myId), me = next.players?.find(player => player.id === myId);
+  if (oldMe && me && me.hp < oldMe.hp) playEffect(me.hp <= 0 && oldMe.hp > 0 ? "death" : "hurt", 1);
+  if (oldMe && me) {
+    const gainedEffect = Object.entries(me.effects || {}).some(([kind, seconds]) => seconds > (oldMe.effects?.[kind] || 0) + 1);
+    const gainedMinion = (me.minions?.length || 0) > (oldMe.minions?.length || 0);
+    if (gainedEffect || gainedMinion || me.hp > oldMe.hp + 1 && oldMe.hp > 0) playEffect("pickup", .8);
+  }
+  const previousBullets = new Set((previous.bullets || []).map(bullet => bullet.id));
+  for (const bullet of next.bullets || []) {
+    if (previousBullets.has(bullet.id)) continue;
+    const strength = bullet.owner === myId ? 1 : effectVolume(bullet.x, bullet.y, next);
+    playEffect(bullet.kind === "cannon" ? "cannon" : bullet.kind === "sniper" ? "sniper" : bullet.kind === "mage" ? "magic" : "shot", strength);
+  }
+  for (const laser of next.lasers || []) if (laser.segment === 0 && (laser.age || 0) < .09) playEffect("laser", laser.owner === myId ? 1 : effectVolume(laser.x1, laser.y1, next));
+  for (const blast of next.explosions || []) {
+    const marker = `${Math.round(blast.x / 8)}:${Math.round(blast.y / 8)}:${Boolean(blast.magic)}`;
+    if (!heardExplosions.has(marker)) { heardExplosions.set(marker, receivedAt + 800); playEffect("explosion", effectVolume(blast.x, blast.y, next)); }
+  }
+  for (const [marker, expires] of heardExplosions) if (expires < receivedAt) heardExplosions.delete(marker);
+}
+function updateSoundButton() {
+  soundToggle.textContent = soundEnabled ? "🔊" : "🔇";
+  soundToggle.title = soundEnabled ? "关闭音效" : "开启音效";
+  soundToggle.setAttribute("aria-label", soundToggle.title);
+}
+soundToggle.addEventListener("click", () => {
+  soundEnabled = !soundEnabled;
+  try { localStorage.setItem("neon-sound", soundEnabled ? "on" : "off"); } catch {}
+  updateSoundButton(); if (soundEnabled) { ensureAudio(); playEffect("ui"); }
+});
+updateSoundButton();
 function updatePowerLabel() {
   const me = state.players.find(player => player.id === myId), effects = Object.entries(me?.effects || {});
   const labels = effects.map(([kind, seconds]) => { const effect = POWERUPS[kind] || { icon: "◆", name: kind }; return `${effect.icon} ${effect.name} ${seconds.toFixed(1)}s`; });
   if (me?.minions?.length) labels.push(`◉ 战斗随从 ×${me.minions.length}`);
   if (me?.role === "weaponmaster" && !effects.some(([kind]) => ["multishot", "laser", "beam", "ricochet", "cannon"].includes(kind))) labels.push(`⚒ 随机武器 ${Math.ceil(me.weapon_cooldown)}s`);
   if (me?.role === "paladin" && !me.effects?.invincible) labels.push(me.ability_cooldown > 0 ? `✧ 圣盾冷却 ${Math.ceil(me.ability_cooldown)}s` : "✧ 圣盾已就绪（空格）");
-  powerLabel.textContent = labels.length ? labels.join("　") : "寻找地图上的发光道具";
+  if (["upgrade", "bio"].includes(requestedMode)) for (const [kind, rank] of Object.entries(me?.upgrades || {})) if (rank) labels.push(`${UPGRADE_INFO[kind]?.name || kind} Lv.${rank}`);
+  powerLabel.textContent = labels.length ? labels.join("　") : requestedMode === "bio" ? "探索地图并消灭僵尸，留意掉落物" : requestedMode === "upgrade" ? "击败敌人获取经验，拾取血包恢复生命" : "寻找地图上的发光道具";
 }
 const KEY_CODES = { KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d", ArrowUp: "arrowup", ArrowDown: "arrowdown", ArrowLeft: "arrowleft", ArrowRight: "arrowright", Space: " " };
 function updateKey(event, pressed) {
@@ -160,7 +340,16 @@ function updateKey(event, pressed) {
     sendInput(performance.now(), true);
   }
 }
-addEventListener("keydown", event => { updateKey(event, true); if (event.code === "Escape" || event.key === "Escape") { ws?.close(); location.reload(); } });
+addEventListener("keydown", event => {
+  if ((event.code === "Escape" || event.key === "Escape") && !guidePanel.hidden) {
+    event.preventDefault(); closeGuide(); return;
+  }
+  if ((event.code === "Escape" || event.key === "Escape") && !roomBrowser.hidden) {
+    event.preventDefault(); closeRoomBrowser(); return;
+  }
+  updateKey(event, true);
+  if (event.code === "Escape" || event.key === "Escape") { ws?.close(); location.reload(); }
+});
 addEventListener("keyup", event => updateKey(event, false));
 addEventListener("blur", stopGameInput);
 document.addEventListener("visibilitychange", () => { if (document.hidden) stopGameInput(); });
@@ -272,7 +461,7 @@ function updateLocalPrediction(now) {
   if (!me?.ready || me.hp <= 0) { predictedSelf = null; lastStopSequence = -1; lastSentMoving = false; return; }
   if (!predictedSelf) predictedSelf = { x: me.x, y: me.y };
   const movement = currentMoveVector();
-  const speed = 300 * (me.effects?.speed ? 1.45 : 1), radius = 25;
+  const speed = 300 * (me.effects?.speed ? 1.45 : 1) * (1 + .06 * (me.upgrades?.agility || 0)), radius = 25;
   predictionBlocked = false;
   if (movement.moving) {
     const nextX = Math.max(radius, Math.min(world.width - radius, predictedSelf.x + movement.x * speed * dt));
@@ -293,8 +482,9 @@ function updateLocalPrediction(now) {
   if (error > 260) { predictedSelf.x = targetX; predictedSelf.y = targetY; return; }
   if (error < .15) return;
   if (!movement.moving) {
-    if (error <= 10) { predictedSelf.x = targetX; predictedSelf.y = targetY; return; }
-    const step = Math.min(error * (1 - Math.exp(-12 * dt)), 240 * dt);
+    if (error <= .75) return;
+    // 停止后只做柔和的服务器校正，禁止小误差直接瞬移造成公网玩家视觉抽动。
+    const step = Math.min(error * (1 - Math.exp(-6 * dt)), 90 * dt);
     predictedSelf.x += errorX / error * step; predictedSelf.y += errorY / error * step;
     return;
   }
@@ -355,7 +545,7 @@ function recordMotionSnapshots(snapshot, receivedAt) {
   const seen = new Set();
   for (const player of snapshot.players || []) {
     if (player.id !== myId) {
-      const key = `p${player.id}`, speed = 300 * (player.effects?.speed ? 1.45 : 1);
+      const key = `p${player.id}`, speed = 300 * (player.effects?.speed ? 1.45 : 1) * (1 + .06 * (player.upgrades?.agility || 0));
       const moveX = Number(player.move_x) || 0, moveY = Number(player.move_y) || 0;
       recordMotionSample(key, player.x, player.y, receivedAt, moveX * speed, moveY * speed, Math.hypot(moveX, moveY) > .01);
       seen.add(key);
@@ -367,17 +557,23 @@ function recordMotionSnapshots(snapshot, receivedAt) {
     }
   }
   for (const bullet of snapshot.bullets || []) {
-    if (bullet.owner === myId || bullet.id === undefined) continue;
+    if (bullet.id === undefined) continue;
     const key = `b${bullet.id}`;
     recordMotionSample(key, bullet.x, bullet.y, receivedAt, bullet.vx || 0, bullet.vy || 0, true);
     seen.add(key);
   }
+  for (const zombie of snapshot.zombies || []) {
+    const key = `z${zombie.id}`, speed = zombie.boss ? 150 : zombie.kind === "runner" ? 195 : zombie.kind === "giant" ? 58 : 105;
+    recordMotionSample(key, zombie.x, zombie.y, receivedAt, (zombie.move_x || 0) * speed, (zombie.move_y || 0) * speed,
+                       Math.hypot(zombie.move_x || 0, zombie.move_y || 0) > .01);
+    seen.add(key);
+  }
   for (const key of motionTracks.keys()) if (!seen.has(key)) motionTracks.delete(key);
 }
-function sampledMotionPoint(key, now, fallbackX, fallbackY) {
+function sampledMotionPoint(key, now, fallbackX, fallbackY, interpolationMs = REMOTE_INTERPOLATION_MS, extrapolationMs = REMOTE_EXTRAPOLATION_MS) {
   const track = motionTracks.get(key), samples = track?.samples;
   if (!samples?.length) return { x: fallbackX, y: fallbackY };
-  const renderTime = now - REMOTE_INTERPOLATION_MS;
+  const renderTime = now - interpolationMs;
   while (samples.length > 2 && samples[1].time <= renderTime) samples.shift();
   const first = samples[0], second = samples[1];
   if (second && renderTime <= second.time) {
@@ -386,7 +582,7 @@ function sampledMotionPoint(key, now, fallbackX, fallbackY) {
   }
   const latest = samples.at(-1);
   if (!latest.moving) return { x: latest.x, y: latest.y };
-  const extra = Math.max(0, Math.min(REMOTE_EXTRAPOLATION_MS, renderTime - latest.time)) / 1000;
+  const extra = Math.max(0, Math.min(extrapolationMs, renderTime - latest.time)) / 1000;
   return { x: latest.x + latest.vx * extra, y: latest.y + latest.vy * extra };
 }
 function smoothedPlayers(now) {
@@ -438,6 +634,62 @@ function drawPickup(p, now) {
   ctx.shadowBlur = 0; ctx.fillStyle = data.color; ctx.font = "bold 22px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(data.icon, x, y + 1);
   ctx.fillStyle = "#dbe8ff"; ctx.font = "bold 11px sans-serif"; ctx.fillText(data.name, x, y + 37); ctx.restore();
 }
+function zombiePoint(zombie, now) {
+  return sampledMotionPoint(`z${zombie.id}`, now, zombie.x, zombie.y, 115, 70);
+}
+function drawZombies(now) {
+  for (const zombie of state.zombies || []) {
+    const point = zombiePoint(zombie, now);
+    if (!visible(point.x, point.y, 0, 0, zombie.radius + 12)) continue;
+    const x = point.x - camera.x, y = point.y - camera.y, radius = zombie.radius || 20;
+    const colors = { normal: "#70c957", shooter: "#b875ff", giant: "#9c6b45", runner: "#d4f05a",
+                     plague_lord: "#70ff70", brood_queen: "#ff5ab7", iron_abomination: "#ff704d" };
+    const color = colors[zombie.kind] || "#77cc66";
+    ctx.save(); ctx.shadowColor = color; ctx.shadowBlur = zombie.boss ? 28 : mobileMode ? 6 : 14;
+    ctx.fillStyle = zombie.boss ? "#27101b" : "#172316"; ctx.strokeStyle = color; ctx.lineWidth = zombie.boss ? 5 : 3;
+    ctx.beginPath();
+    if (zombie.kind === "runner") ctx.moveTo(x, y - radius), ctx.lineTo(x + radius, y + radius), ctx.lineTo(x - radius, y + radius), ctx.closePath();
+    else ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke(); ctx.shadowBlur = 0;
+    ctx.fillStyle = zombie.kind === "shooter" ? "#e8c7ff" : "#ff435f";
+    ctx.beginPath(); ctx.arc(x - radius * .34, y - radius * .18, Math.max(2, radius * .11), 0, Math.PI * 2); ctx.arc(x + radius * .34, y - radius * .18, Math.max(2, radius * .11), 0, Math.PI * 2); ctx.fill();
+    const barWidth = Math.max(34, radius * 2.2); ctx.fillStyle = "#25172a"; ctx.fillRect(x - barWidth / 2, y + radius + 9, barWidth, 5);
+    ctx.fillStyle = zombie.boss ? "#ff4365" : "#81e66c"; ctx.fillRect(x - barWidth / 2, y + radius + 9, barWidth * Math.max(0, zombie.hp) / zombie.max_hp, 5);
+    if (zombie.boss) { ctx.fillStyle = "#ffd6df"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center"; ctx.fillText(zombie.boss_name, x, y - radius - 12); }
+    ctx.restore();
+  }
+}
+function updateBioExploration(me) {
+  if (requestedMode !== "bio" || !me) return;
+  const cell = 140, centerX = Math.floor(me.x / cell), centerY = Math.floor(me.y / cell);
+  for (let offsetY = -2; offsetY <= 2; offsetY++) for (let offsetX = -2; offsetX <= 2; offsetX++)
+    if (offsetX * offsetX + offsetY * offsetY <= 6) exploredBioCells.add(`${centerX + offsetX},${centerY + offsetY}`);
+}
+function bioCellExplored(x, y) { return exploredBioCells.has(`${Math.floor(x / 140)},${Math.floor(y / 140)}`); }
+function drawBioFog(me) {
+  if (requestedMode !== "bio" || !me) return;
+  const x = me.x - camera.x, y = me.y - camera.y, gradient = ctx.createRadialGradient(x, y, 170, x, y, 540);
+  gradient.addColorStop(0, "#00000000"); gradient.addColorStop(.52, "#0206050a"); gradient.addColorStop(.8, "#010303b8"); gradient.addColorStop(1, "#000000fa");
+  ctx.save(); ctx.fillStyle = gradient; ctx.fillRect(0, 0, sceneWidth, sceneHeight); ctx.restore();
+}
+function drawBioMinimap(me, now) {
+  if (requestedMode !== "bio" || !me) return;
+  const width = Math.min(210, viewWidth * .34), height = width * world.height / world.width;
+  const x = viewWidth - width - 14, y = 62, scaleX = width / world.width, scaleY = height / world.height;
+  ctx.save(); ctx.fillStyle = "#030706ee"; ctx.strokeStyle = "#4d775f"; ctx.lineWidth = 2; ctx.beginPath(); ctx.roundRect(x, y, width, height, 10); ctx.fill(); ctx.stroke(); ctx.beginPath(); ctx.roundRect(x, y, width, height, 10); ctx.clip();
+  const cell = 140;
+  for (const key of exploredBioCells) { const [column, row] = key.split(",").map(Number); ctx.fillStyle = "#14261d"; ctx.fillRect(x + column * cell * scaleX, y + row * cell * scaleY, cell * scaleX + 1, cell * scaleY + 1); }
+  ctx.fillStyle = "#344b40";
+  for (const wall of state.obstacles || []) if (wall.active && bioCellExplored(wall.x + wall.w / 2, wall.y + wall.h / 2)) ctx.fillRect(x + wall.x * scaleX, y + wall.y * scaleY, Math.max(1, wall.w * scaleX), Math.max(1, wall.h * scaleY));
+  for (const player of state.players || []) if (bioCellExplored(player.x, player.y)) { ctx.fillStyle = player.id === myId ? "#72f1d0" : player.color; ctx.beginPath(); ctx.arc(x + player.x * scaleX, y + player.y * scaleY, player.id === myId ? 4 : 3, 0, Math.PI * 2); ctx.fill(); }
+  for (const zombie of state.zombies || []) if (Math.hypot(zombie.x - me.x, zombie.y - me.y) < 430) { ctx.fillStyle = zombie.boss ? "#ff3155" : "#9ee866"; ctx.beginPath(); ctx.arc(x + zombie.x * scaleX, y + zombie.y * scaleY, zombie.boss ? 4 : 2, 0, Math.PI * 2); ctx.fill(); }
+  ctx.restore(); ctx.fillStyle = "#9eb6a8"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "right"; ctx.fillText("探索地图", x + width - 7, y + height - 7);
+}
+function drawBioWaveHud() {
+  if (requestedMode !== "bio" || !state.bio) return;
+  const bio = state.bio, label = bio.active ? `第 ${bio.wave} 波 · 剩余 ${bio.remaining}` : bio.wave ? `第 ${bio.wave} 波完成 · ${Math.ceil(bio.next_wave)} 秒后继续` : `感染逼近 · ${Math.ceil(bio.next_wave)} 秒`;
+  ctx.save(); ctx.textAlign = "center"; ctx.font = "bold 17px sans-serif"; ctx.fillStyle = bio.boss ? "#ff6b86" : "#d8ffe2"; ctx.shadowColor = bio.boss ? "#ff3155" : "#57d98b"; ctx.shadowBlur = 12; ctx.fillText(bio.boss ? `${label} · BOSS ${bio.boss}` : label, viewWidth / 2, 32); ctx.restore();
+}
 function drawPlayer(p) {
   if (!p.ready) return;
   if (!visible(p.x, p.y)) return;
@@ -447,29 +699,36 @@ function drawPlayer(p) {
   ctx.shadowBlur = mobileMode ? 9 : 22; ctx.shadowColor = p.color; ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(x, y, 24, 0, Math.PI * 2); ctx.fill();
   ctx.shadowBlur = 0; ctx.strokeStyle = "#fff"; ctx.lineWidth = p.id === myId ? 4 : 2; ctx.stroke();
   if (Object.keys(p.effects || {}).length) { ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 2; ctx.setLineDash([4, 5]); ctx.beginPath(); ctx.arc(x, y, 31, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]); }
-  ctx.fillStyle = "#eaf2ff"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center"; ctx.fillText(dead ? "复活中…" : p.name, x, y - 40);
+  ctx.fillStyle = "#eaf2ff"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center"; ctx.fillText(dead ? "复活中…" : `${["upgrade", "bio"].includes(requestedMode) ? `[Lv.${p.level || 1}] ` : ""}${p.name}`, x, y - 40);
   ctx.fillStyle = "#17213b"; ctx.fillRect(x - 26, y + 33, 52, 6); ctx.fillStyle = p.hp > p.max_hp / 2 ? "#55d6be" : "#ff5d73"; ctx.fillRect(x - 26, y + 33, 52 * Math.max(0, p.hp) / p.max_hp, 6); ctx.restore();
 }
-function recordSpeedTrails(players) {
+function recordSpeedTrails(players, now) {
+  const active = new Set();
   for (const p of players) {
-    if (!p.effects?.speed || p.hp <= 0) continue;
-    const trail = speedTrails.get(p.id) || [], last = trail.at(-1);
-    if (!last || Math.hypot(p.x - last.x, p.y - last.y) >= 8) {
-      trail.push({ x: p.x, y: p.y, color: p.color, alpha: .5 });
-      if (trail.length > 10) trail.shift();
-      speedTrails.set(p.id, trail);
+    if (!p.effects?.speed || p.hp <= 0 || !p.ready) { speedTrails.delete(p.id); speedTrailAnchors.delete(p.id); continue; }
+    active.add(p.id);
+    const anchor = speedTrailAnchors.get(p.id);
+    if (!anchor) { speedTrailAnchors.set(p.id, { x: p.x, y: p.y, time: now }); continue; }
+    const distance = Math.hypot(p.x - anchor.x, p.y - anchor.y);
+    if (distance > 120) { speedTrails.delete(p.id); speedTrailAnchors.set(p.id, { x: p.x, y: p.y, time: now }); continue; }
+    if (distance >= 9 && now - anchor.time >= 28) {
+      const trail = speedTrails.get(p.id) || [];
+      trail.push({ x: anchor.x, y: anchor.y, color: p.color, created: now });
+      if (trail.length > 6) trail.shift();
+      speedTrails.set(p.id, trail); speedTrailAnchors.set(p.id, { x: p.x, y: p.y, time: now });
     }
   }
+  for (const id of speedTrailAnchors.keys()) if (!active.has(id)) { speedTrailAnchors.delete(id); speedTrails.delete(id); }
 }
-function drawSpeedTrails() {
+function drawSpeedTrails(now) {
   for (const [id, trail] of speedTrails) {
     for (const ghost of trail) {
-      if (!visible(ghost.x, ghost.y)) { ghost.alpha -= .022; continue; }
-      ctx.save(); ctx.globalAlpha = ghost.alpha; ctx.fillStyle = ghost.color; ctx.shadowBlur = mobileMode ? 5 : 14; ctx.shadowColor = ghost.color;
+      const progress = Math.max(0, Math.min(1, (now - ghost.created) / 220));
+      if (!visible(ghost.x, ghost.y) || progress >= 1) continue;
+      ctx.save(); ctx.globalAlpha = .46 * (1 - progress) ** 1.4; ctx.fillStyle = ghost.color; ctx.shadowBlur = mobileMode ? 5 : 14; ctx.shadowColor = ghost.color;
       ctx.beginPath(); ctx.arc(ghost.x - camera.x, ghost.y - camera.y, 22, 0, Math.PI * 2); ctx.fill(); ctx.restore();
-      ghost.alpha -= .022;
     }
-    const remainingTrail = trail.filter(ghost => ghost.alpha > 0);
+    const remainingTrail = trail.filter(ghost => now - ghost.created < 220);
     if (remainingTrail.length) speedTrails.set(id, remainingTrail); else speedTrails.delete(id);
   }
 }
@@ -497,21 +756,30 @@ function extrapolatedBulletPosition(bullet, seconds) {
   fraction = Math.max(0, Math.min(1, fraction));
   return { x: bullet.x + dx * fraction, y: bullet.y + dy * fraction };
 }
+function sampledBulletPoint(bullet, now) {
+  const samples = motionTracks.get(`b${bullet.id}`)?.samples;
+  if (!samples?.length) return { x: bullet.x, y: bullet.y };
+  const latest = samples.at(-1);
+  const seconds = Math.max(0, Math.min(BULLET_EXTRAPOLATION_MS, now - latest.time)) / 1000;
+  return extrapolatedBulletPosition({ ...bullet, x: latest.x, y: latest.y, vx: latest.vx, vy: latest.vy }, seconds);
+}
 function drawProjectiles(now) {
-  const extrapolation = Math.min(Math.max(0, now - stateReceivedAt) / 1000, .06);
   for (const l of state.lasers || []) { let laserX1 = l.x1, laserY1 = l.y1; if (l.owner === myId && l.segment === 0 && predictedSelf && (l.age || 0) < .18) { const blend = 1 - (l.age || 0) / .18; laserX1 += (predictedSelf.x - l.x1) * blend; laserY1 += (predictedSelf.y - l.y1) * blend; } if (!visible(Math.min(laserX1, l.x2), Math.min(laserY1, l.y2), Math.abs(l.x2 - laserX1), Math.abs(l.y2 - laserY1))) continue; ctx.save(); ctx.strokeStyle = l.color; ctx.shadowColor = l.color; ctx.shadowBlur = mobileMode ? 8 : l.beam ? 17 : 25; ctx.lineWidth = l.beam ? 7 : 11; ctx.globalAlpha = l.beam ? .18 : .25; ctx.beginPath(); ctx.moveTo(laserX1 - camera.x, laserY1 - camera.y); ctx.lineTo(l.x2 - camera.x, l.y2 - camera.y); ctx.stroke(); ctx.lineWidth = l.beam ? 2.5 : 4; ctx.globalAlpha = 1; ctx.beginPath(); ctx.moveTo(laserX1 - camera.x, laserY1 - camera.y); ctx.lineTo(l.x2 - camera.x, l.y2 - camera.y); ctx.stroke(); ctx.restore(); }
-  for (const b of state.bullets || []) { let bulletPoint; if (b.owner === myId) { let visualBullet = b; if (predictedSelf && (b.age || 0) < .18) { const serverMe = state.players.find(player => player.id === myId), blend = 1 - (b.age || 0) / .18; if (serverMe) visualBullet = { ...b, x: b.x + (predictedSelf.x - serverMe.x) * blend, y: b.y + (predictedSelf.y - serverMe.y) * blend }; } bulletPoint = extrapolatedBulletPosition(visualBullet, extrapolation); } else { bulletPoint = sampledMotionPoint(`b${b.id}`, now, b.x, b.y); } const bulletX = bulletPoint.x, bulletY = bulletPoint.y; if (!visible(bulletX, bulletY)) continue; const radius = b.radius || 6; ctx.fillStyle = b.color; ctx.shadowBlur = mobileMode ? 7 : b.kind === "cannon" ? 28 : 16; ctx.shadowColor = b.color; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, radius, 0, Math.PI * 2); ctx.fill(); if (b.kind === "cannon") { ctx.strokeStyle = "#ffe2a8"; ctx.lineWidth = 4; ctx.stroke(); } else if (b.kind === "mage") { ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke(); } else if (b.kind === "sniper") { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, 2, 0, Math.PI * 2); ctx.fill(); } else if (b.bounces > 0) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); } } ctx.shadowBlur = 0;
+  for (const b of state.bullets || []) { let bulletPoint = sampledBulletPoint(b, now); if (b.owner === myId && predictedSelf && (b.age || 0) < .18) { const serverMe = state.players.find(player => player.id === myId), blend = 1 - (b.age || 0) / .18; if (serverMe) bulletPoint = { x: bulletPoint.x + (predictedSelf.x - serverMe.x) * blend, y: bulletPoint.y + (predictedSelf.y - serverMe.y) * blend }; } const bulletX = bulletPoint.x, bulletY = bulletPoint.y; if (!visible(bulletX, bulletY)) continue; const radius = b.radius || 6; ctx.fillStyle = b.color; ctx.shadowBlur = mobileMode ? 7 : b.kind === "cannon" ? 28 : 16; ctx.shadowColor = b.color; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, radius, 0, Math.PI * 2); ctx.fill(); if (b.kind === "cannon") { ctx.strokeStyle = "#ffe2a8"; ctx.lineWidth = 4; ctx.stroke(); } else if (b.kind === "zombie") { ctx.strokeStyle = "#d8ff9c"; ctx.lineWidth = 2; ctx.stroke(); ctx.fillStyle = "#264b1c"; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, Math.max(2, radius - 4), 0, Math.PI * 2); ctx.fill(); } else if (b.kind === "mage") { ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke(); } else if (b.kind === "sniper") { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, 2, 0, Math.PI * 2); ctx.fill(); } else if (b.bounces > 0) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); } } ctx.shadowBlur = 0;
   for (const blast of state.explosions || []) { if (!visible(blast.x, blast.y, 0, 0, blast.radius)) continue; const total = blast.magic ? .25 : .35, alpha = Math.max(0, blast.life / total), radius = blast.radius * (1 - alpha * .45); ctx.save(); ctx.globalAlpha = alpha; ctx.fillStyle = `${blast.color}44`; ctx.strokeStyle = blast.magic ? "#f6e8ff" : blast.color; ctx.lineWidth = blast.magic ? 4 : 7; ctx.shadowBlur = mobileMode ? 10 : 30; ctx.shadowColor = blast.color; ctx.beginPath(); ctx.arc(blast.x - camera.x, blast.y - camera.y, radius, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore(); }
 }
 function render(now) {
   updateLocalPrediction(now); updateLatency(now);
   const displayPlayers = smoothedPlayers(now), me = displayPlayers.find(player => player.id === myId);
+  updateBioExploration(me);
+  recordSpeedTrails(displayPlayers, now);
   if (me) { camera.x += (me.x - sceneWidth / 2 - camera.x) * .12; camera.y += (me.y - sceneHeight / 2 - camera.y) * .12; camera.x = Math.max(0, Math.min(world.width - sceneWidth, camera.x)); camera.y = Math.max(0, Math.min(world.height - sceneHeight, camera.y)); }
   ctx.save(); ctx.scale(viewScale, viewScale);
-  drawGrid(); (state.pickups || []).forEach(p => drawPickup(p, now)); (state.obstacles || []).forEach(drawObstacle); drawSpeedTrails(); drawProjectiles(now); drawMinions(displayPlayers); displayPlayers.forEach(drawPlayer);
+  drawGrid(); (state.pickups || []).forEach(p => drawPickup(p, now)); (state.obstacles || []).forEach(drawObstacle); drawSpeedTrails(now); drawZombies(now); drawProjectiles(now); drawMinions(displayPlayers); displayPlayers.forEach(drawPlayer); drawBioFog(me);
   ctx.restore();
   const board = [...state.players].sort((a, b) => b.score - a.score); ctx.textAlign = "right"; ctx.font = "bold 14px sans-serif";
-  board.forEach((p, i) => { ctx.fillStyle = p.id === myId ? "#72f1d0" : "#c5d1e6"; ctx.fillText(`${i + 1}. ${p.name}  ${p.score}`, viewWidth - 20, 32 + i * 22); });
+  if (requestedMode !== "bio") board.forEach((p, i) => { ctx.fillStyle = p.id === myId ? "#72f1d0" : "#c5d1e6"; ctx.fillText(`${i + 1}. ${requestedMode === "upgrade" ? `[Lv.${p.level || 1}] ` : ""}${p.name}  ${p.score}`, viewWidth - 20, 32 + i * 22); });
+  drawBioMinimap(me, now); drawBioWaveHud();
   if (myId && !receivedState) { ctx.fillStyle = "#eef6ff"; ctx.font = "bold 20px sans-serif"; ctx.textAlign = "center"; ctx.fillText("正在等待服务器状态…", viewWidth / 2, viewHeight / 2); }
   sendInput(now); requestAnimationFrame(render);
 }

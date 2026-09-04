@@ -12,11 +12,13 @@ $ProgressPreference = "SilentlyContinue"
 
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $runtimeDir = Join-Path $projectDir ".runtime"
+$serverStdout = Join-Path $runtimeDir "server-$Port-out.log"
 $serverProcess = $null
 $frpcProcess = $null
 $ownsServer = $false
 $ownsFrpc = $false
-$expectedProtocol = 13
+$expectedProtocol = 16
+$expectedBuild = 43
 $instanceLock = [Threading.Mutex]::new($false, "Local\NeonBrawlFrp$Port")
 $lockTaken = $false
 
@@ -92,7 +94,8 @@ function Get-GameHealth {
 function Test-GameServer {
     param([int]$GamePort)
     $result = Get-GameHealth -GamePort $GamePort
-    return $result -and $result.game -eq "neon-brawl" -and $result.edition -eq "internet" -and $result.protocol -eq $expectedProtocol
+    $hasBuild = $result -and ($result.PSObject.Properties.Name -contains "build")
+    return $result -and $result.game -eq "neon-brawl" -and $result.edition -eq "internet" -and $result.protocol -eq $expectedProtocol -and $hasBuild -and $result.build -eq $expectedBuild
 }
 
 function Install-GameDependencies {
@@ -170,10 +173,15 @@ try {
     if ($existingHealth -and $existingHealth.game -eq "neon-brawl" -and $existingHealth.edition -ne "internet") {
         throw "端口 $Port 正由其他霓虹乱斗版本使用，请改用其他端口，例如：.\start_internet.ps1 -Port 8082"
     }
-    if ($existingHealth -and $existingHealth.game -eq "neon-brawl" -and $existingHealth.edition -eq "internet" -and $existingHealth.protocol -ne $expectedProtocol) {
+    $existingHasBuild = $existingHealth -and ($existingHealth.PSObject.Properties.Name -contains "build")
+    $serverOutdated = $existingHealth -and $existingHealth.game -eq "neon-brawl" -and $existingHealth.edition -eq "internet" -and (
+        $existingHealth.protocol -ne $expectedProtocol -or -not $existingHasBuild -or $existingHealth.build -ne $expectedBuild
+    )
+    if ($serverOutdated) {
         $listener = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $listener) { throw "检测到旧版游戏服务器，请关闭旧服务器窗口后重试。" }
-        Write-Host "检测到协议 $($existingHealth.protocol) 的旧游戏服务器，正在自动升级……" -ForegroundColor Yellow
+        $currentBuild = if ($existingHasBuild) { $existingHealth.build } else { "未知" }
+        Write-Host "检测到旧游戏服务器（构建 $currentBuild），正在自动升级到构建 $expectedBuild……" -ForegroundColor Yellow
         Stop-Process -Id $listener.OwningProcess -Force -ErrorAction Stop
         Start-Sleep -Milliseconds 500
     }
@@ -190,7 +198,7 @@ try {
                 -ArgumentList @("-u", "server.py") `
                 -WorkingDirectory $projectDir `
                 -WindowStyle Hidden `
-                -RedirectStandardOutput (Join-Path $runtimeDir "server-$Port-out.log") `
+                -RedirectStandardOutput $serverStdout `
                 -RedirectStandardError (Join-Path $runtimeDir "server-$Port-error.log") `
                 -PassThru
             $ownsServer = $true
@@ -245,11 +253,19 @@ try {
     Write-Host "FRP 配置：$frpcConfig"
     Write-Host "本机测试地址：http://localhost:$Port"
     Write-Host "保持此窗口运行；按 Ctrl+C 会同时停止游戏服务器和 frpc。"
+    Write-Host "房间人数变化会实时显示在此窗口。" -ForegroundColor Cyan
     Write-Host "Cloudflare 备用入口：start_cloudflare.bat"
     Write-Host ""
 
     if (-not $NoBrowser) { Start-Process "http://localhost:$Port" }
+    $lastRoomStatus = ""
     while ((Test-GameServer -GamePort $Port) -and -not $frpcProcess.HasExited) {
+        $latestRoomStatus = Get-Content -LiteralPath $serverStdout -Tail 40 -ErrorAction SilentlyContinue |
+            Where-Object { $_.StartsWith("[房间人数]") } | Select-Object -Last 1
+        if ($latestRoomStatus -and $latestRoomStatus -ne $lastRoomStatus) {
+            Write-Host $latestRoomStatus -ForegroundColor Cyan
+            $lastRoomStatus = $latestRoomStatus
+        }
         Start-Sleep -Seconds 1
     }
     if ($frpcProcess.HasExited) {

@@ -11,7 +11,40 @@ h1 { font-size: 38px; margin: 5px 0; color: #72f1d0; text-shadow: 0 0 25px #38d9
 .card input, .card select { width: 100%; margin-top: 7px; padding: 13px 15px; border: 1px solid #334a78; border-radius: 10px; background: #091226; color: white; font-size: 16px; outline: none; }
 .card input:focus, .card select:focus { border-color: #55d6be; }
 .card button { width: 100%; margin-top: 24px; padding: 14px; border: 0; border-radius: 11px; background: linear-gradient(135deg, #55d6be, #4597ff); color: #07101c; font-weight: 800; font-size: 17px; cursor: pointer; }
+.card button.secondary-button { margin-top: 10px; border: 1px solid #42618f; background: #111e39; color: #dce9ff; font-size: 15px; }
 .card small { display: block; margin-top: 18px; color: #7485a5; }
+#roomBrowser { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); background: #040914dd; backdrop-filter: blur(9px); }
+#roomBrowser[hidden] { display: none; }
+.room-browser-card { display: flex; flex-direction: column; width: min(94vw, 620px); max-height: min(82vh, 650px); overflow: hidden; padding: 20px; border: 1px solid #42618f; border-radius: 20px; background: #0b1429f5; box-shadow: 0 24px 80px #000c; }
+.room-browser-card header { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-bottom: 14px; border-bottom: 1px solid #293d65; }
+.room-browser-card h2 { margin: 0 0 4px; color: #72f1d0; }
+.room-browser-card small { color: #8ea0c0; }
+#roomBrowserClose { flex: 0 0 auto; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 50%; background: #1b2a49; color: #fff; font-size: 24px; cursor: pointer; }
+#roomList { flex: 1; min-height: 100px; overflow-y: auto; padding: 12px 0; }
+.room-empty { padding: 26px 8px; color: #8192b2; text-align: center; }
+.room-row { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(105px, 1.2fr) auto auto; align-items: center; gap: 10px; margin-bottom: 8px; padding: 12px; border: 1px solid #293d65; border-radius: 12px; background: #101c35; }
+.room-code { min-width: 0; overflow: hidden; color: #eef6ff; text-overflow: ellipsis; white-space: nowrap; }
+.room-mode { color: #78e9d4; font-size: 13px; }
+.room-count { color: #aebbd3; font-size: 12px; white-space: nowrap; }
+.room-row button, #roomRefresh { padding: 8px 12px; border: 0; border-radius: 9px; background: #55d6be; color: #07101c; font-weight: 800; cursor: pointer; }
+.room-row button[disabled] { opacity: .45; cursor: not-allowed; }
+#roomRefresh { align-self: center; min-width: 120px; }
+#guidePanel { position: fixed; inset: 0; z-index: 31; display: grid; place-items: center; padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); background: #040914e8; backdrop-filter: blur(9px); }
+#guidePanel[hidden] { display: none; }
+.guide-card { display: flex; flex-direction: column; width: min(94vw, 760px); max-height: min(90vh, 780px); overflow: hidden; border: 1px solid #42618f; border-radius: 20px; background: #0b1429f8; box-shadow: 0 24px 80px #000c; }
+.guide-card > header { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 18px 20px 14px; border-bottom: 1px solid #293d65; }
+.guide-card h2 { margin: 0 0 3px; color: #72f1d0; }
+.guide-card header small { color: #8ea0c0; }
+#guideClose { flex: 0 0 auto; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 50%; background: #1b2a49; color: #fff; font-size: 24px; cursor: pointer; }
+.guide-content { overflow-y: auto; overscroll-behavior: contain; padding: 16px 20px 24px; }
+.guide-content section { margin-bottom: 13px; padding: 14px 16px; border: 1px solid #263b62; border-radius: 13px; background: #101c35; }
+.guide-content section:last-child { margin-bottom: 0; }
+.guide-content h3 { margin: 0 0 8px; color: #72f1d0; font-size: 17px; }
+.guide-content p, .guide-content li { color: #c2cee2; font-size: 14px; line-height: 1.65; }
+.guide-content p { margin: 6px 0; }
+.guide-content ul { margin: 4px 0; padding-left: 21px; }
+.guide-content li { margin: 4px 0; }
+.guide-content b { color: #eef6ff; }
 #game { position: fixed; left: 0; top: 0; width: var(--view-width); height: var(--view-height); overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
 canvas { width: var(--view-width); height: var(--view-height); }
 canvas { display: block; cursor: crosshair; touch-action: none; }
@@ -27,8 +60,10 @@ canvas { display: block; cursor: crosshair; touch-action: none; }
 #skillButton[disabled] { opacity: .48; filter: grayscale(.5); }
 #chatToggle { position: fixed; top: 16px; right: 16px; z-index: 6; min-width: 86px; padding: 9px 13px; border: 1px solid #42618f; border-radius: 18px; background: #101a32e8; color: #eef6ff; font-weight: 700; cursor: pointer; box-shadow: 0 8px 24px #0007; }
 #chatToggle[hidden] { display: none; }
-#chatUnread { display: inline-block; width: 9px; height: 9px; margin-left: 4px; border-radius: 50%; background: #ff5d73; box-shadow: 0 0 10px #ff5d73; }
+#chatUnread { position: absolute; top: -7px; right: -6px; display: grid; place-items: center; min-width: 19px; height: 19px; padding: 0 4px; border: 2px solid #fff; border-radius: 999px; background: #ff243f; color: #fff; font: 800 10px/1 sans-serif; box-shadow: 0 0 0 4px #ff243f33, 0 0 15px #ff243f; animation: unreadPulse 1.25s ease-in-out infinite; }
 #chatUnread[hidden] { display: none; }
+@keyframes unreadPulse { 0%, 100% { transform: scale(1); box-shadow: 0 0 0 3px #ff243f2b, 0 0 10px #ff243f; } 50% { transform: scale(1.16); box-shadow: 0 0 0 7px #ff243f19, 0 0 20px #ff243f; } }
+#soundToggle { position: fixed; top: 16px; right: 112px; z-index: 6; width: 38px; height: 38px; padding: 0; border: 1px solid #42618f; border-radius: 50%; background: #101a32e8; color: #eef6ff; font-size: 17px; cursor: pointer; box-shadow: 0 8px 24px #0007; }
 #chatPanel { position: fixed; top: 14px; right: 14px; z-index: 7; display: flex; flex-direction: column; width: min(340px, calc(var(--view-width) - 28px)); height: min(350px, calc(var(--view-height) - 28px)); border: 1px solid #42618f; border-radius: 16px; overflow: hidden; background: #091329f2; box-shadow: 0 18px 55px #000b; backdrop-filter: blur(12px); }
 #chatPanel[hidden] { display: none; }
 #chatPanel header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 9px 15px; border-bottom: 1px solid #293d65; color: #72f1d0; }
@@ -53,6 +88,18 @@ canvas { display: block; cursor: crosshair; touch-action: none; }
 #rotateNotice small { color: #91a3c3; font-size: 13px; }
 #roles { position: fixed; left: 0; top: 0; width: var(--view-width); height: var(--view-height); z-index: 5; display: grid; place-items: center; background: #050a16cc; backdrop-filter: blur(8px); }
 #roles[hidden] { display: none; }
+#upgrades { position: fixed; inset: 0; width: var(--view-width); height: var(--view-height); z-index: 8; display: grid; place-items: center; padding: 14px; background: #050a16d9; backdrop-filter: blur(9px); }
+#upgrades[hidden] { display: none; }
+.upgrade-card { width: min(92vw, 720px); padding: 28px; border: 1px solid #8067d9; border-radius: 22px; background: #101a32; text-align: center; box-shadow: 0 24px 90px #000b, 0 0 45px #7c5cff26; }
+.upgrade-card h2 { margin: 0; color: #d9c7ff; font-size: 30px; text-shadow: 0 0 22px #9f7cff77; }
+.upgrade-card p { margin: 8px 0 20px; color: #aebbd3; }
+.upgrade-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.upgrade-grid button { min-height: 126px; padding: 16px 12px; border: 1px solid #715baa; border-radius: 14px; background: linear-gradient(145deg, #19213f, #11172d); color: #eef6ff; cursor: pointer; transition: transform .15s, border-color .15s; }
+.upgrade-grid button:hover { transform: translateY(-3px); border-color: #cbb5ff; }
+.upgrade-grid b, .upgrade-grid small, .upgrade-grid em { display: block; }
+.upgrade-grid b { margin-bottom: 8px; color: #d9c7ff; font-size: 17px; }
+.upgrade-grid small { color: #b7c5df; line-height: 1.4; }
+.upgrade-grid em { margin-top: 9px; color: #72f1d0; font-size: 11px; font-style: normal; }
 .role-card { width: min(92vw, 650px); padding: 30px; border: 1px solid #42618f; border-radius: 22px; background: #101a32; text-align: center; box-shadow: 0 24px 90px #000b; }
 .role-card h2 { margin: 0; font-size: 30px; color: #72f1d0; }
 .role-card p { color: #9eadc9; }
@@ -73,8 +120,43 @@ html.mobile-controls #help { bottom: max(6px, env(safe-area-inset-bottom)); font
 html.mobile-controls #hud { top: max(6px, env(safe-area-inset-top)); left: max(6px, env(safe-area-inset-left)); max-width: calc(var(--view-width) - 12px); padding: 7px 10px; font-size: 11px; }
 html.mobile-controls #powerups { margin-top: 4px; font-size: 10px; }
 html.mobile-controls #chatToggle { top: max(6px, env(safe-area-inset-top)); right: max(6px, env(safe-area-inset-right)); min-width: 74px; padding: 7px 10px; font-size: 12px; }
+html.mobile-controls #soundToggle { top: max(6px, env(safe-area-inset-top)); right: max(88px, calc(env(safe-area-inset-right) + 82px)); width: 34px; height: 34px; font-size: 15px; }
 html.mobile-controls #chatPanel { top: max(5px, env(safe-area-inset-top)); right: max(5px, env(safe-area-inset-right)); width: min(370px, calc(var(--view-width) - 10px)); height: min(310px, calc(var(--view-height) - 10px)); }
-@media (orientation: portrait) { html.mobile-controls #rotateNotice { display: grid; } }
+@media (orientation: portrait) {
+  html.mobile-controls #rotateNotice { display: none; }
+  html.mobile-controls #hud { top: max(50px, calc(env(safe-area-inset-top) + 46px)); left: max(7px, env(safe-area-inset-left)); right: max(7px, env(safe-area-inset-right)); max-width: none; padding: 7px 9px; }
+  html.mobile-controls #hud b { display: block; margin: 0 0 3px; }
+  html.mobile-controls #powerups { max-height: 42px; overflow: hidden; line-height: 1.35; }
+  html.mobile-controls #joystick, html.mobile-controls #aimJoystick { bottom: max(22px, env(safe-area-inset-bottom)); width: min(116px, 29vw); height: min(116px, 29vw); }
+  html.mobile-controls #joystick { left: max(16px, env(safe-area-inset-left)); }
+  html.mobile-controls #aimJoystick { right: max(16px, env(safe-area-inset-right)); }
+  html.mobile-controls #help { display: none; }
+  html.mobile-controls #skillButton { right: max(26px, env(safe-area-inset-right)); bottom: max(154px, calc(env(safe-area-inset-bottom) + 138px)); }
+  html.mobile-controls #chatPanel { top: max(48px, calc(env(safe-area-inset-top) + 42px)); left: max(7px, env(safe-area-inset-left)); right: max(7px, env(safe-area-inset-right)); width: auto; height: min(52vh, 390px); }
+  html.mobile-controls #roles { align-items: start; overflow-y: auto; padding: max(54px, calc(env(safe-area-inset-top) + 48px)) 10px max(16px, env(safe-area-inset-bottom)); }
+  html.mobile-controls .role-card { width: min(94vw, 520px); padding: 18px 14px; }
+  html.mobile-controls .role-card h2 { font-size: 24px; }
+  html.mobile-controls .role-card p { margin: 5px 0 12px; }
+  html.mobile-controls .role-grid { gap: 8px; margin-top: 8px; }
+  html.mobile-controls .role-grid button { min-height: 72px; padding: 10px 7px; }
+  html.mobile-controls .role-grid b { font-size: 14px; margin-bottom: 4px; }
+  html.mobile-controls .role-grid small { font-size: 10px; }
+  .upgrade-card { width: 96vw; padding: 17px 12px; }
+  .upgrade-card h2 { font-size: 23px; }
+  .upgrade-grid { gap: 7px; }
+  .upgrade-grid button { min-height: 112px; padding: 10px 7px; }
+  .upgrade-grid b { font-size: 14px; }
+  .upgrade-grid small { font-size: 10px; }
+  .room-browser-card { width: 96vw; max-height: 86vh; padding: 14px; }
+  .room-row { grid-template-columns: minmax(90px, 1fr) auto; gap: 6px 10px; }
+  .room-mode, .room-count { font-size: 11px; }
+  .room-row button { grid-column: 2; grid-row: 1 / span 2; }
+  .guide-card { width: 96vw; max-height: 92vh; }
+  .guide-card > header { padding: 14px; }
+  .guide-content { padding: 12px; }
+  .guide-content section { padding: 11px 12px; }
+  .guide-content p, .guide-content li { font-size: 13px; }
+}
 @media (orientation: landscape) and (max-height: 500px) {
   .role-card { width: min(88vw, 650px); padding: 14px 20px; }
   .role-card h2 { font-size: 21px; }

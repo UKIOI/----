@@ -14,7 +14,8 @@ $runtimeDir = Join-Path $projectDir ".runtime"
 $serverProcess = $null
 $tunnelProcess = $null
 $ownsServer = $false
-$expectedProtocol = 13
+$expectedProtocol = 16
+$expectedBuild = 43
 $instanceLock = [Threading.Mutex]::new($false, "Local\NeonBrawlInternet$Port")
 $lockTaken = $false
 
@@ -31,7 +32,8 @@ function Get-GameHealth {
 function Test-GameServer {
     param([int]$GamePort)
     $result = Get-GameHealth -GamePort $GamePort
-    return $result -and $result.game -eq "neon-brawl" -and $result.edition -eq "internet" -and $result.protocol -eq $expectedProtocol
+    $hasBuild = $result -and ($result.PSObject.Properties.Name -contains "build")
+    return $result -and $result.game -eq "neon-brawl" -and $result.edition -eq "internet" -and $result.protocol -eq $expectedProtocol -and $hasBuild -and $result.build -eq $expectedBuild
 }
 
 function Get-Cloudflared {
@@ -76,10 +78,15 @@ try {
     if ($existingHealth -and $existingHealth.game -eq "neon-brawl" -and $existingHealth.edition -eq "local") {
         throw "端口 $Port 正由本地版使用。请保持本地版运行，并用其他端口启动互联网版，例如：.\start_internet.ps1 -Port 8082"
     }
-    if ($existingHealth -and $existingHealth.game -eq "neon-brawl" -and $existingHealth.edition -eq "internet" -and $existingHealth.protocol -ne $expectedProtocol) {
+    $existingHasBuild = $existingHealth -and ($existingHealth.PSObject.Properties.Name -contains "build")
+    $serverOutdated = $existingHealth -and $existingHealth.game -eq "neon-brawl" -and $existingHealth.edition -eq "internet" -and (
+        $existingHealth.protocol -ne $expectedProtocol -or -not $existingHasBuild -or $existingHealth.build -ne $expectedBuild
+    )
+    if ($serverOutdated) {
         $listener = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $listener) { throw "检测到旧版游戏服务器，但无法确定对应进程，请关闭旧服务器窗口后重试。" }
-        Write-Host "检测到协议 $($existingHealth.protocol) 的旧游戏服务器，正在自动升级……" -ForegroundColor Yellow
+        $currentBuild = if ($existingHasBuild) { $existingHealth.build } else { "未知" }
+        Write-Host "检测到旧游戏服务器（构建 $currentBuild），正在自动升级到构建 $expectedBuild……" -ForegroundColor Yellow
         Stop-Process -Id $listener.OwningProcess -Force -ErrorAction Stop
         Start-Sleep -Milliseconds 500
         if (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue) {

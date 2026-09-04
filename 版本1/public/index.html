@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-  <title>霓虹乱斗</title><link rel="stylesheet" href="/static/style.css?v=12">
+  <title>霓虹乱斗</title><link rel="stylesheet" href="/static/style.css?v=17">
 </head>
 <body>
   <div id="rotateNotice"><div>↻<b>请将手机横屏</b><small>横屏后游戏会自动适配可用画面</small></div></div>
@@ -15,16 +15,37 @@
         <option value="items">多道具模式 · 三倍道具</option>
         <option value="pure">纯净模式 · 无道具</option>
         <option value="profession">职业模式 · 职业技能与血包</option>
+        <option value="upgrade">升级模式 · 击杀升级并选择强化</option>
+        <option value="bio">生化模式 · 合作抵御僵尸潮</option>
       </select></label>
-      <button id="join">加入战斗</button><small>把网址和房间号发给朋友即可联机</small>
+      <button id="join">加入战斗</button><button id="roomBrowserToggle" class="secondary-button" type="button">查看现有房间</button><button id="guideToggle" class="secondary-button" type="button">玩法说明</button><small>把网址和房间号发给朋友即可联机</small>
     </section>
   </main>
+  <section id="roomBrowser" hidden aria-label="房间列表"><div class="room-browser-card">
+    <header><div><h2>现有房间</h2><small>选择房间可自动填写房间号和模式</small></div><button id="roomBrowserClose" aria-label="关闭房间列表">×</button></header>
+    <div id="roomList" aria-live="polite"><p class="room-empty">正在读取房间……</p></div>
+    <button id="roomRefresh" type="button">刷新列表</button>
+  </div></section>
+  <section id="guidePanel" hidden role="dialog" aria-modal="true" aria-labelledby="guideTitle"><div class="guide-card">
+    <header><div><h2 id="guideTitle">玩法说明</h2><small>霓虹乱斗完整规则</small></div><button id="guideClose" aria-label="关闭玩法说明">×</button></header>
+    <div class="guide-content">
+      <section><h3>胜负与基础规则</h3><p>每个房间最多 12 名真人。普通角色有 100 点生命，普通子弹造成 25 点伤害；击败敌人获得 1 分，死亡 2.5 秒后复活。地图障碍会阻挡玩家和普通子弹。</p></section>
+      <section><h3>房间与困难人机</h3><p>房间只有 1 名真人时，服务器会自动加入 1 名困难人机；第 2 名真人进入时人机立即消失，之后若又只剩 1 名真人，人机会重新加入。真人全部离开后房间自动关闭。</p><p>困难人机会绕墙寻路、预判射击、躲避来袭子弹、拾取道具，并在低血量时优先寻找血包或撤到掩体。人机算作参战角色，会影响场上道具数量。</p></section>
+      <section><h3>六种模式</h3><ul><li><b>经典模式：</b>道具数等于参战角色数。</li><li><b>多道具模式：</b>道具数为参战角色数的 3 倍。</li><li><b>纯净模式：</b>不生成道具。</li><li><b>职业模式：</b>只生成血包；进入游戏及每次死亡后重新选择职业，击杀分数保留。</li><li><b>升级模式：</b>只生成血包；累计击杀达到 1、3、6、10、15……分时升级，从 3 个强化中选择 1 个，强化死亡后保留。</li><li><b>生化模式：</b>玩家合作抵御逐渐增强的僵尸波次，地图、敌人数量、生命和伤害会按联机人数调整；无队友伤害。</li></ul></section>
+      <section><h3>道具与武器</h3><ul><li><b>强化伤害：</b>普通子弹伤害从 25 提高至 40。</li><li><b>高速射击：</b>显著缩短普通子弹发射间隔。</li><li><b>三重子弹：</b>一次向三个方向发射。</li><li><b>反射激光：</b>最多反射 3 次，命中造成 50 点伤害。</li><li><b>强化护盾：</b>普通伤害减半，激光伤害减少 75%。</li><li><b>移动加速：</b>移速提高 45%，移动时产生短残影。</li><li><b>高能光束：</b>持续发射可反射光束，每次命中造成 8 点伤害。</li><li><b>生命补给：</b>恢复 25 点生命，不超过生命上限。</li><li><b>反弹弹药：</b>普通子弹最多反弹 3 次。</li><li><b>攻城大炮：</b>低射速大型炮弹，造成 70 点范围伤害；可摧毁附近地形，5 秒后恢复。</li><li><b>战斗随从：</b>永久存在、可无限叠加，生命为主人最大生命的三分之一，会环绕主人并自动攻击；耗尽生命后消失。</li></ul><p>除血包和随从外，普通道具效果持续 10 秒。</p></section>
+      <section><h3>职业模式</h3><ul><li><b>坦克：</b>300 点生命。</li><li><b>法师：</b>1.5 倍伤害的范围爆炸弹。</li><li><b>狙击手：</b>更快的子弹，伤害为普通子弹的 3 倍。</li><li><b>死灵法师：</b>自己或死灵随从击杀玩家后，永久生成可自主追击的随从。</li><li><b>武器大师：</b>每 20 秒获得一种随机特殊武器，持续 10 秒。</li><li><b>圣骑士：</b>发动圣盾后无敌并加速 7 秒，冷却 20 秒。</li></ul></section>
+      <section><h3>升级模式强化</h3><ul><li><b>生命强化：</b>每级最大生命 +15，并恢复 15 点，最多 3 级。</li><li><b>火力强化：</b>每级子弹伤害 +10%，最多 3 级。</li><li><b>快速装填：</b>每级射击间隔缩短 10%，最多 3 级。</li><li><b>机动强化：</b>每级移动速度 +6%，最多 3 级。</li><li><b>高速弹药：</b>每级子弹速度 +10%，最多 3 级。</li><li><b>武器扩展：</b>升级为双发、三发；额外弹丸会降低单发伤害，最多 2 级。</li></ul><p>等级越高，需要的累计击杀越多，最高 18 级。等级显示在玩家名字和排行榜名字前。</p></section>
+      <section><h3>生化模式</h3><p>使用更大的迷宫地图和局部视野，视野边缘会逐渐变黑。右上角小地图只绘制亲自探索过的区域；队友会显示在已探索区域，僵尸只有靠近时才会暴露。</p><ul><li><b>普通僵尸：</b>均衡的近战敌人。</li><li><b>腐化射手：</b>保持距离并发射毒液弹。</li><li><b>巨型僵尸：</b>缓慢、耐打且近战伤害高。</li><li><b>迅捷僵尸：</b>体型小、生命较低但移动极快。</li><li><b>瘟疫领主：</b>释放近身瘟疫光环和环形毒弹。</li><li><b>巢群女王：</b>定期召唤迅捷僵尸。</li><li><b>钢铁畸变体：</b>周期性冲锋并释放八向震荡弹。</li></ul><p>每 5 波随机出现一只 Boss。击杀僵尸获得不同数量经验，升级可选择永久强化；普通僵尸有概率掉落血包和稀有武器，Boss 必定掉落血包及两件特殊道具。每波结束后存活玩家恢复 20% 生命。</p></section>
+      <section><h3>电脑、手机与社交</h3><p>电脑使用 WASD/方向键移动、鼠标瞄准、按住左键射击；圣骑士按空格发动技能。手机横屏和竖屏均可玩：左轮盘移动，右轮盘瞄准并射击，圣骑士使用屏幕技能按钮。</p><p>右上角可开关音效或展开房间聊天；聊天收起时，新消息会显示红色未读数。开始页面的“查看现有房间”可查看模式和人数并直接选择房间。</p></section>
+    </div>
+  </div></section>
   <div id="game" hidden><canvas id="canvas"></canvas><div id="hud"><b id="roomLabel"></b><span id="status">连接中…</span><em id="powerups"></em></div>
     <div id="help"><span class="desktop-help">WASD / 方向键移动　·　鼠标瞄准　·　按住左键射击　·　拾取发光道具强化武器　·　ESC 返回</span><span class="touch-help">左轮盘移动　·　右轮盘瞄准并射击</span></div>
     <div id="joystick" aria-label="移动摇杆"><div id="joystickKnob"></div></div>
     <div id="aimJoystick" aria-label="射击摇杆"><div id="aimJoystickKnob"></div></div>
     <button id="skillButton" hidden>圣盾</button>
-    <button id="chatToggle" aria-label="打开聊天">💬 聊天 <i id="chatUnread" hidden></i></button>
+    <button id="soundToggle" aria-label="关闭音效" title="关闭音效">🔊</button>
+    <button id="chatToggle" aria-label="打开聊天">💬 聊天 <i id="chatUnread" hidden>0</i></button>
     <section id="chatPanel" hidden aria-label="房间聊天">
       <header><b>房间聊天</b><button id="chatClose" aria-label="关闭聊天">×</button></header>
       <div id="chatMessages" aria-live="polite"><p class="chat-tip">和同一房间的玩家打个招呼吧</p></div>
@@ -36,8 +57,9 @@
       <button data-role="sniper"><b>⌖ 狙击手</b><small>高速、三倍伤害</small></button>
       <button data-role="necromancer"><b>☠ 死灵法师</b><small>击杀敌人转化随从</small></button>
       <button data-role="weaponmaster"><b>⚒ 武器大师</b><small>每 20 秒获得随机武器</small></button>
-      <button data-role="paladin"><b>✧ 圣骑士</b><small>空格：无敌并加速 5 秒</small></button>
+      <button data-role="paladin"><b>✧ 圣骑士</b><small>空格：无敌并加速 7 秒</small></button>
     </div></div></section>
+    <section id="upgrades" hidden><div class="upgrade-card"><h2>等级提升</h2><p id="upgradeProgress">选择一项永久强化</p><div id="upgradeChoices" class="upgrade-grid"></div></div></section>
   </div>
-  <script src="/static/game.js?v=31"></script>
+  <script src="/static/game.js?v=43"></script>
 </body></html>
