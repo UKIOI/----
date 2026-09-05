@@ -16,7 +16,7 @@ BIO_WIDTH, BIO_HEIGHT = 2800, 1800
 TICK_RATE = 30
 NETWORK_RATE = 25
 PROTOCOL_VERSION = 16
-BUILD_VERSION = 43
+BUILD_VERSION = 69
 PLAYER_SPEED = 300
 BULLET_SPEED = 760
 CHAT_MAX_LENGTH = 120
@@ -30,16 +30,36 @@ POWERUP_TYPES = ("damage", "rapid", "multishot", "laser", "shield", "speed", "be
 WEAPON_MASTER_WEAPONS = ("multishot", "laser", "beam", "ricochet", "cannon")
 BOT_ROLES = ("tank", "mage", "sniper", "necromancer", "weaponmaster", "paladin")
 UPGRADE_MAX_RANKS = {"vitality": 3, "power": 3, "haste": 3, "agility": 3, "velocity": 3, "arsenal": 2}
+BIO_DROP_POOL = ("damage", "rapid", "multishot", "shield", "speed", "ricochet", "cannon", "laser", "beam", "minion")
+TEST_SETTING_LIMITS = {
+    "player_hp": (20, 1000), "bullet_damage": (1, 200), "laser_damage": (1, 500),
+    "beam_damage": (1, 100), "cannon_damage": (1, 500), "weapon_duration": (1, 60),
+    "zombie_hp_scale": (.25, 5), "zombie_damage_scale": (.25, 5),
+}
 ZOMBIE_STATS = {
     "normal": {"hp": 65, "speed": 105, "damage": 12, "radius": 21, "xp": 1},
     "shooter": {"hp": 55, "speed": 78, "damage": 10, "radius": 20, "xp": 2},
     "giant": {"hp": 250, "speed": 58, "damage": 28, "radius": 35, "xp": 4},
     "runner": {"hp": 38, "speed": 195, "damage": 8, "radius": 14, "xp": 1},
+    "raider": {"hp": 82, "speed": 120, "damage": 18, "radius": 20, "xp": 3},
+    "infector": {"hp": 115, "speed": 92, "damage": 9, "radius": 23, "xp": 4},
+    "vomiter": {"hp": 145, "speed": 68, "damage": 8, "radius": 27, "xp": 4},
 }
 BOSS_STATS = {
     "plague_lord": {"name": "瘟疫领主", "hp": 1200, "speed": 72, "damage": 16, "radius": 48, "xp": 14},
     "brood_queen": {"name": "巢群女王", "hp": 1050, "speed": 85, "damage": 18, "radius": 44, "xp": 14},
     "iron_abomination": {"name": "钢铁畸变体", "hp": 1550, "speed": 62, "damage": 34, "radius": 55, "xp": 18},
+}
+INFECTED_FORM_STATS = {
+    "normal": {"name": "普通感染体", "hp": 110, "speed": 285, "damage": 18, "cooldown": .48},
+    "raider": {"name": "突袭感染体", "hp": 82, "speed": 390, "damage": 16, "cooldown": .38},
+    "shooter": {"name": "射手感染体", "hp": 78, "speed": 270, "damage": 15, "cooldown": .55},
+    "giant": {"name": "巨型感染体", "hp": 260, "speed": 185, "damage": 38, "cooldown": .8},
+    "vomiter": {"name": "呕吐感染体", "hp": 145, "speed": 235, "damage": 10, "cooldown": 1.5},
+}
+INFECTED_ABILITY_COOLDOWNS = {
+    "normal": 12, "raider": 8, "shooter": 10, "giant": 14, "vomiter": 12,
+    "plague_lord": 16, "brood_queen": 16, "iron_abomination": 16,
 }
 NAV_CELL = 50
 OBSTACLES = [
@@ -154,6 +174,16 @@ class Room:
         self.next_minion_id = 0
         self.next_bullet_id = 0
         self.zombies = []
+        self.pending_zombies = []
+        self.host_id = None
+        self.rescue_enabled = False
+        self.rescue_progress = {}
+        self.infection_progress = {}
+        self.hazards = []
+        self.next_hazard_id = 0
+        self.test_settings = {"player_hp": 100, "bullet_damage": 25, "laser_damage": 50,
+                              "beam_damage": 8, "cannon_damage": 70, "weapon_duration": POWERUP_DURATION,
+                              "zombie_hp_scale": 1, "zombie_damage_scale": 1}
         self.next_zombie_id = 0
         self.wave = 0
         self.wave_active = False
@@ -213,6 +243,9 @@ class Room:
     def humans(self):
         return [player for player in self.players.values() if not player.get("is_bot")]
 
+    def bio_strength_players(self):
+        return [player for player in self.humans() if not player.get("infected")]
+
     def sync_solo_bot(self):
         bots = self.bots()
         if self.mode == "bio":
@@ -253,13 +286,14 @@ class Room:
 
     def path_clear(self, start_x, start_y, end_x, end_y, radius=PLAYER_RADIUS + 2):
         distance = math.hypot(end_x - start_x, end_y - start_y)
-        steps = max(1, math.ceil(distance / 24))
-        terrain = list(self.active_terrain())
-        for step in range(1, steps + 1):
-            ratio = step / steps
-            x = start_x + (end_x - start_x) * ratio
-            y = start_y + (end_y - start_y) * ratio
-            if any(circle_hits_rect(x, y, radius, obstacle) for obstacle in terrain):
+        if distance < .001:
+            return True
+        direction_x, direction_y = (end_x - start_x) / distance, (end_y - start_y) / distance
+        for obstacle in self.active_terrain():
+            expanded = {"x": obstacle["x"] - radius, "y": obstacle["y"] - radius,
+                        "w": obstacle["w"] + radius * 2, "h": obstacle["h"] + radius * 2}
+            hit = ray_rect_hit(start_x, start_y, direction_x, direction_y, expanded)
+            if hit and hit[0] <= distance:
                 return False
         return True
 
@@ -464,6 +498,7 @@ class Room:
 
     def zombie_spawn_position(self, radius):
         players = [player for player in self.humans() if player.get("hp", 0) > 0]
+        terrain = list(self.active_terrain())
         for _ in range(180):
             side = random.randrange(4)
             if side == 0:
@@ -474,33 +509,46 @@ class Room:
                 x, y = random.randint(radius, 150), random.randint(radius, self.height - radius)
             else:
                 x, y = random.randint(self.width - 150, self.width - radius), random.randint(radius, self.height - radius)
-            if any(circle_hits_rect(x, y, radius + 3, wall) for wall in self.active_terrain()):
+            if any(circle_hits_rect(x, y, radius + 3, wall) for wall in terrain):
                 continue
             if players and min(math.hypot(player["x"] - x, player["y"] - y) for player in players) < 520:
                 continue
             return x, y
         return self.random_open_position(radius + 5)
 
-    def spawn_zombie(self, kind, now, boss_kind=None):
-        humans = max(1, len(self.humans()))
+    def nearby_zombie_spawn_position(self, center_x, center_y, radius, slot=0):
+        terrain = list(self.active_terrain())
+        for attempt in range(28):
+            angle = slot * 2.399963 + attempt * .73
+            distance = 105 + (attempt % 4) * 34
+            x = clamp(center_x + math.cos(angle) * distance, radius, self.width - radius)
+            y = clamp(center_y + math.sin(angle) * distance, radius, self.height - radius)
+            if not any(circle_hits_rect(x, y, radius + 4, wall) for wall in terrain):
+                return x, y
+        return self.random_open_position(radius + 5)
+
+    def spawn_zombie(self, kind, now, boss_kind=None, position=None):
+        humans = max(1, len(self.bio_strength_players()))
         stats = BOSS_STATS[boss_kind] if boss_kind else ZOMBIE_STATS[kind]
-        health_scale = (1 + max(0, self.wave - 1) * .1) * (1 + max(0, humans - 1) * .2)
-        damage_scale = (1 + max(0, self.wave - 1) * .045) * (1 + max(0, humans - 1) * .08)
+        health_scale = (1 + max(0, self.wave - 1) * .1) * (1 + max(0, humans - 1) * .2) * self.test_settings["zombie_hp_scale"]
+        damage_scale = (1 + max(0, self.wave - 1) * .045) * (1 + max(0, humans - 1) * .08) * self.test_settings["zombie_damage_scale"]
         radius = stats["radius"]
-        x, y = self.zombie_spawn_position(radius)
+        x, y = position if position is not None else self.zombie_spawn_position(radius)
         zombie = {"id": self.next_zombie_id, "kind": boss_kind or kind, "boss": bool(boss_kind),
                   "boss_name": stats.get("name"), "x": x, "y": y, "radius": radius,
                   "hp": round(stats["hp"] * health_scale), "max_hp": round(stats["hp"] * health_scale),
                   "speed": stats["speed"], "damage": stats["damage"] * damage_scale, "xp": stats["xp"],
-                  "last_attack": 0, "last_shot": 0, "next_think": 0, "next_special": now + 3,
-                  "move_x": 0, "move_y": 0, "charge_until": 0}
+                  "last_attack": 0, "last_shot": 0, "next_think": now + random.uniform(0, .45), "next_special": now + 3,
+                  "move_x": 0, "move_y": 0, "charge_until": 0, "steer_bias": random.choice((-1, 1)),
+                  "disguised": kind == "raider" and self.wave > 10, "revealed": not (kind == "raider" and self.wave > 10),
+                  "infection_target": None, "next_charge": 0}
         self.next_zombie_id += 1
         self.zombies.append(zombie)
         return zombie
 
     def start_bio_wave(self, now):
         self.wave += 1
-        humans = max(1, len(self.humans()))
+        humans = max(1, len(self.bio_strength_players()))
         count = min(48, math.ceil((4 + self.wave * 1.55) * (.72 + humans * .48)))
         choices = ["normal"] * 7
         if self.wave >= 2:
@@ -509,10 +557,24 @@ class Room:
             choices += ["shooter"] * 3
         if self.wave >= 4:
             choices += ["giant"] * 2
-        for _ in range(count):
-            self.spawn_zombie(random.choice(choices), now)
+            choices += ["raider"] * 2
+        if self.wave >= 5:
+            choices += ["vomiter"] * 2
+        if self.wave >= 6:
+            choices += ["infector"]
+        spawn_plan = [(random.choice(choices), None) for _ in range(count)]
         if self.wave % 5 == 0:
-            self.spawn_zombie("boss", now, random.choice(tuple(BOSS_STATS)))
+            spawn_plan.append(("boss", random.choice(tuple(BOSS_STATS))))
+        for player in self.humans():
+            if not player.get("infected"):
+                continue
+            self.rescale_infected_player_health(player)
+            player["zombie_respawns"] = 3
+            if player["hp"] <= 0:
+                player["choosing_zombie"] = True
+        # 每帧最多生成少量僵尸，避免波次刷新在单帧内计算全部出生点并阻塞移动同步。
+        self.pending_zombies = [(now + index * .055, kind, boss_kind)
+                                for index, (kind, boss_kind) in enumerate(spawn_plan)]
         self.wave_active = True
         self.wave_message_until = now + 3
 
@@ -537,40 +599,214 @@ class Room:
         if zombie.get("boss"):
             self.drop_bio_pickup(zombie["x"], zombie["y"], "health")
             for _ in range(2):
-                self.drop_bio_pickup(zombie["x"], zombie["y"], random.choice(("damage", "rapid", "multishot", "shield", "speed", "ricochet", "cannon", "laser")))
+                self.drop_bio_pickup(zombie["x"], zombie["y"], random.choice(BIO_DROP_POOL))
         else:
-            if random.random() < .18:
+            if random.random() < .07:
                 self.drop_bio_pickup(zombie["x"], zombie["y"], "health")
             if random.random() < .035:
-                self.drop_bio_pickup(zombie["x"], zombie["y"], random.choice(("damage", "rapid", "multishot", "shield", "speed", "ricochet", "cannon", "laser")))
+                self.drop_bio_pickup(zombie["x"], zombie["y"], random.choice(BIO_DROP_POOL))
 
-    def move_zombie(self, zombie, dx, dy, dt, speed):
+    def zombie_steering(self, zombie, goal_x, goal_y, terrain):
+        dx, dy = goal_x - zombie["x"], goal_y - zombie["y"]
+        distance = math.hypot(dx, dy)
+        if distance < 2:
+            return 0, 0
+        base_angle = math.atan2(dy, dx)
+        probe = max(64, min(120, zombie["radius"] * 2.4 + zombie["speed"] * .22))
+
+        def direction_open(angle):
+            move_x, move_y = math.cos(angle), math.sin(angle)
+            for scale in (.55, 1):
+                x, y = zombie["x"] + move_x * probe * scale, zombie["y"] + move_y * probe * scale
+                if not (zombie["radius"] <= x <= self.width - zombie["radius"] and
+                        zombie["radius"] <= y <= self.height - zombie["radius"]):
+                    return None
+                nearby = self.nearby_terrain(terrain, x, y, zombie["radius"] + 3)
+                if any(circle_hits_rect(x, y, zombie["radius"] + 3, wall) for wall in nearby):
+                    return None
+            return move_x, move_y
+
+        direct = direction_open(base_angle)
+        if direct:
+            return direct
+        # 僵尸只检查附近的绕行方向，不再各自搜索整张地图；固定偏向可避免墙边左右抖动。
+        bias = zombie.get("steer_bias", 1)
+        for offset in (.38, .72, 1.08, 1.46, 1.9, 2.35, math.pi):
+            for side in (bias, -bias):
+                candidate = direction_open(base_angle + offset * side)
+                if candidate:
+                    return candidate
+        return 0, 0
+
+    @staticmethod
+    def terrain_collision_index(terrain):
+        grid, cell = {}, 128
+        for wall in terrain:
+            for column in range(int(wall["x"] // cell), int((wall["x"] + wall["w"]) // cell) + 1):
+                for row in range(int(wall["y"] // cell), int((wall["y"] + wall["h"]) // cell) + 1):
+                    grid.setdefault((column, row), []).append(wall)
+        return grid
+
+    @staticmethod
+    def nearby_terrain(terrain, x, y, radius):
+        if not isinstance(terrain, dict):
+            return terrain
+        cell, found, seen = 128, [], set()
+        for column in range(int((x - radius) // cell), int((x + radius) // cell) + 1):
+            for row in range(int((y - radius) // cell), int((y + radius) // cell) + 1):
+                for wall in terrain.get((column, row), ()):
+                    marker = wall["id"]
+                    if marker not in seen:
+                        seen.add(marker)
+                        found.append(wall)
+        return found
+
+    def move_zombie(self, zombie, dx, dy, dt, speed, terrain=None):
         radius = zombie["radius"]
+        terrain = terrain if terrain is not None else list(self.active_terrain())
         next_x = clamp(zombie["x"] + dx * speed * dt, radius, self.width - radius)
-        if not any(circle_hits_rect(next_x, zombie["y"], radius, wall) for wall in self.active_terrain()):
+        if not any(circle_hits_rect(next_x, zombie["y"], radius, wall) for wall in self.nearby_terrain(terrain, next_x, zombie["y"], radius)):
             zombie["x"] = next_x
         next_y = clamp(zombie["y"] + dy * speed * dt, radius, self.height - radius)
-        if not any(circle_hits_rect(zombie["x"], next_y, radius, wall) for wall in self.active_terrain()):
+        if not any(circle_hits_rect(zombie["x"], next_y, radius, wall) for wall in self.nearby_terrain(terrain, zombie["x"], next_y, radius)):
             zombie["y"] = next_y
 
-    def zombie_volley(self, zombie, target, now, radial=False, count=1):
+    def zombie_volley(self, zombie, target, now, radial=False, count=1, kind="zombie", speed=460, damage_scale=1):
         base_angle = math.atan2(target["y"] - zombie["y"], target["x"] - zombie["x"])
         angles = [index * math.tau / count for index in range(count)] if radial else [base_angle]
         for angle in angles:
-            self.add_bullet({"x": zombie["x"], "y": zombie["y"], "vx": math.cos(angle) * 460,
-                             "vy": math.sin(angle) * 460, "owner": f"z{zombie['id']}", "color": "#9cff57",
-                             "damage": zombie["damage"], "damage_type": "normal", "radius": 7,
-                             "kind": "zombie", "bounces": 0, "life": 3.2, "created": now})
+            self.add_bullet({"x": zombie["x"], "y": zombie["y"], "vx": math.cos(angle) * speed,
+                             "vy": math.sin(angle) * speed, "owner": f"z{zombie['id']}", "color": "#9cff57",
+                             "damage": zombie["damage"] * damage_scale, "damage_type": "normal", "radius": 9 if kind == "vomit" else 7,
+                             "kind": kind, "bounces": 0, "life": 3.2, "created": now})
+
+    def create_pollution(self, x, y, now, strength=1):
+        self.hazards.append({"id": self.next_hazard_id, "x": x, "y": y,
+                             "radius": min(155, 78 + strength * 9), "damage": 4 + strength * 1.4,
+                             "expires": now + min(12, 5.5 + strength * .7)})
+        self.next_hazard_id += 1
+        self.hazards = self.hazards[-20:]
+
+    def update_hazards(self, dt, now):
+        self.hazards = [hazard for hazard in self.hazards if hazard["expires"] > now]
+        for hazard in self.hazards:
+            for player in self.humans():
+                if player["hp"] > 0 and not player.get("infected") and math.hypot(player["x"] - hazard["x"], player["y"] - hazard["y"]) < hazard["radius"]:
+                    self.damage(player, hazard["damage"] * dt, "", now)
+
+    def infect_player(self, player):
+        if player.get("infected"):
+            return
+        base_max_hp = player.pop("last_survivor_base_max_hp", None)
+        if base_max_hp is not None:
+            player["max_hp"] = base_max_hp
+        player.update(infected=True, choosing_zombie=True, zombie_form=None, zombie_respawns=3,
+                      boss_used_wave=0, hp=0, respawn=math.inf, last_survivor=False)
+        player["effects"].clear()
+        player["minions"] = []
+        player["input"].update(up=False, down=False, left=False, right=False,
+                               move_x=0, move_y=0, shoot=False, ability=False)
+        self.rescue_progress.pop(player["id"], None)
+        self.infection_progress.pop(player["id"], None)
+
+    def infected_player_max_hp(self, form):
+        stats = BOSS_STATS.get(form) or INFECTED_FORM_STATS.get(form)
+        if not stats:
+            return None
+        boss_modifier = .55 if form in BOSS_STATS else 1
+        wave_scale = 1 + max(0, self.wave - 1) * .1
+        return round(stats["hp"] * boss_modifier * wave_scale * self.test_settings["zombie_hp_scale"])
+
+    def rescale_infected_player_health(self, player, refill=False):
+        new_max_hp = self.infected_player_max_hp(player.get("zombie_form"))
+        if new_max_hp is None:
+            return
+        old_max_hp = max(1, player.get("max_hp", new_max_hp))
+        old_hp = player.get("hp", 0)
+        player["max_hp"] = new_max_hp
+        if refill:
+            player["hp"] = new_max_hp
+        elif old_hp > 0:
+            player["hp"] = max(1, min(new_max_hp, old_hp * new_max_hp / old_max_hp))
+
+    def select_zombie_form(self, player, form):
+        if self.mode != "bio" or not player.get("infected") or not player.get("choosing_zombie"):
+            return False
+        boss_form = form in BOSS_STATS
+        if boss_form and (self.wave == 0 or self.wave % 5 or player.get("boss_used_wave") == self.wave):
+            return False
+        if not boss_form and form not in INFECTED_FORM_STATS:
+            return False
+        stats = BOSS_STATS[form] if boss_form else INFECTED_FORM_STATS[form]
+        if boss_form:
+            player["boss_used_wave"] = self.wave
+        # 每次选择都重新套用该形态的完整基础属性；旧形态残血和临时技能不能带入新形态。
+        form_max_hp = self.infected_player_max_hp(form)
+        player.update(zombie_form=form, choosing_zombie=False, max_hp=form_max_hp,
+                      hp=form_max_hp, last_shot=0, shot_queued=False,
+                      ability_ready=time.monotonic())
+        for effect in ("infected_frenzy", "invincible", "speed"):
+            player["effects"].pop(effect, None)
+        player["input"].update(up=False, down=False, left=False, right=False,
+                               move_x=0, move_y=0, shoot=False, ability=False)
+        return True
+
+    def update_last_survivor(self, now):
+        if self.mode != "bio":
+            return
+        members = self.humans()
+        survivors = [player for player in members
+                     if player.get("ready") and player.get("hp", 0) > 0 and not player.get("infected")]
+        has_infected_teammate = any(player.get("infected") for player in members)
+        survivor_id = survivors[0]["id"] if len(members) >= 2 and has_infected_teammate and len(survivors) == 1 else None
+        for player in members:
+            was_active = player.get("last_survivor", False)
+            active = player["id"] == survivor_id
+            player["last_survivor"] = active
+            if active and not was_active:
+                base_max_hp = player["max_hp"]
+                player["last_survivor_base_max_hp"] = base_max_hp
+                player["max_hp"] = base_max_hp * 2
+                player["hp"] = min(player["max_hp"], player["hp"] * 2)
+                player["effects"]["invincible"] = max(player["effects"].get("invincible", 0), now + 2)
+            elif was_active and not active:
+                boosted_max_hp = max(1, player["max_hp"])
+                base_max_hp = player.pop("last_survivor_base_max_hp", boosted_max_hp / 2)
+                player["max_hp"] = base_max_hp
+                player["hp"] = min(base_max_hp, player["hp"] * base_max_hp / boosted_max_hp)
+
+    def apply_test_settings(self, values):
+        for key, (minimum, maximum) in TEST_SETTING_LIMITS.items():
+            if key in values:
+                self.test_settings[key] = clamp(finite_number(values[key], self.test_settings[key]), minimum, maximum)
+        base_hp = self.test_settings["player_hp"]
+        for player in self.humans():
+            if player.get("infected"):
+                self.rescale_infected_player_health(player)
+                continue
+            old_max = max(1, player.get("max_hp", base_hp))
+            vitality = player.get("upgrades", {}).get("vitality", 0)
+            unboosted_max = base_hp * (3 if player.get("role") == "tank" else 1) + vitality * 15
+            if player.get("last_survivor"):
+                player["last_survivor_base_max_hp"] = unboosted_max
+            new_max = unboosted_max * (2 if player.get("last_survivor") else 1)
+            player["max_hp"] = new_max
+            player["hp"] = min(new_max, player["hp"] * new_max / old_max)
 
     def update_zombies(self, dt, now):
         if self.mode != "bio":
             return
         self.zombies = [zombie for zombie in self.zombies if zombie["hp"] > 0]
-        if self.wave_active and not self.zombies:
+        spawned = 0
+        while self.pending_zombies and self.pending_zombies[0][0] <= now and spawned < 2:
+            _, kind, boss_kind = self.pending_zombies.pop(0)
+            self.spawn_zombie(kind, now, boss_kind)
+            spawned += 1
+        if self.wave_active and not self.zombies and not self.pending_zombies:
             self.wave_active = False
             self.next_wave = now + 5
             for player in self.humans():
-                if player["hp"] > 0:
+                if player["hp"] > 0 and not player.get("infected"):
                     player["hp"] = min(player["max_hp"], player["hp"] + player["max_hp"] * .2)
         if not self.wave_active and now >= self.next_wave and self.humans():
             self.start_bio_wave(now)
@@ -578,49 +814,104 @@ class Room:
             self.next_bio_pickup = now + random.uniform(22, 36)
             if random.random() < .35:
                 x, y = self.random_open_position(45)
-                self.drop_bio_pickup(x, y, random.choice(("damage", "rapid", "multishot", "shield", "speed", "ricochet", "cannon", "laser")))
-        targets = [player for player in self.humans() if player["ready"] and player["hp"] > 0]
-        if not targets:
+                self.drop_bio_pickup(x, y, random.choice(BIO_DROP_POOL))
+        targets = [player for player in self.humans() if player["ready"] and player["hp"] > 0 and not player.get("infected")]
+        corpses = [player for player in self.humans() if player["ready"] and player["hp"] <= 0 and not player.get("infected")]
+        active_infections = set()
+        infected_players = [player for player in self.humans()
+                            if player["ready"] and player["hp"] > 0 and player.get("infected") and not player.get("choosing_zombie")]
+        for infected_player in infected_players:
+            available_corpses = [corpse for corpse in corpses if corpse["id"] not in active_infections]
+            if not available_corpses:
+                break
+            target = min(available_corpses, key=lambda corpse: math.hypot(
+                corpse["x"] - infected_player["x"], corpse["y"] - infected_player["y"]))
+            if math.hypot(target["x"] - infected_player["x"], target["y"] - infected_player["y"]) > PLAYER_RADIUS * 2 + 12:
+                continue
+            active_infections.add(target["id"])
+            progress = self.infection_progress.get(target["id"], 0) + dt
+            self.infection_progress[target["id"]] = progress
+            if progress >= 5:
+                self.infect_player(target)
+                corpses = [corpse for corpse in corpses if corpse["id"] != target["id"]]
+        if not targets and not corpses:
             return
+        terrain = self.terrain_collision_index(list(self.active_terrain()))
         for zombie in self.zombies:
-            target = min(targets, key=lambda player: math.hypot(player["x"] - zombie["x"], player["y"] - zombie["y"]))
+            infecting = zombie["kind"] == "infector" and bool(corpses)
+            available_corpses = [corpse for corpse in corpses if corpse["id"] not in active_infections]
+            if infecting and available_corpses:
+                target = min(available_corpses, key=lambda player: math.hypot(player["x"] - zombie["x"], player["y"] - zombie["y"]))
+            elif targets:
+                target = min(targets, key=lambda player: math.hypot(player["x"] - zombie["x"], player["y"] - zombie["y"]))
+                infecting = False
+            else:
+                continue
             dx, dy = target["x"] - zombie["x"], target["y"] - zombie["y"]
             distance = max(1, math.hypot(dx, dy))
+            if zombie["kind"] == "raider" and distance < 360 and now >= zombie.get("next_charge", 0):
+                zombie["revealed"] = True
+                zombie["charge_until"] = now + 1.15
+                zombie["next_charge"] = now + 4.8
             if now >= zombie["next_think"]:
-                zombie["next_think"] = now + random.uniform(.18, .3)
-                if zombie["kind"] == "shooter" and distance < 290:
-                    move_x, move_y = self.bot_steering(zombie, zombie["x"] - dx, zombie["y"] - dy)
+                # 将大量僵尸的寻路分散到不同服务器帧，避免波次开始时集中计算导致玩家卡顿。
+                zombie["next_think"] = now + random.uniform(.38, .58)
+                if zombie["kind"] in {"shooter", "vomiter"} and distance < 290:
+                    move_x, move_y = self.zombie_steering(zombie, zombie["x"] - dx, zombie["y"] - dy, terrain)
                 elif zombie["kind"] == "shooter" and distance < 470:
-                    move_x, move_y = -dy / distance, dx / distance
+                    orbit_x, orbit_y = zombie["x"] - dy / distance * 180, zombie["y"] + dx / distance * 180
+                    move_x, move_y = self.zombie_steering(zombie, orbit_x, orbit_y, terrain)
                 else:
-                    move_x, move_y = self.bot_steering(zombie, target["x"], target["y"])
+                    move_x, move_y = self.zombie_steering(zombie, target["x"], target["y"], terrain)
                 zombie["move_x"], zombie["move_y"] = move_x, move_y
             speed = zombie["speed"]
             if zombie["kind"] == "iron_abomination" and now < zombie["charge_until"]:
                 speed *= 2.8
-            self.move_zombie(zombie, zombie["move_x"], zombie["move_y"], dt, speed)
+            if zombie["kind"] == "raider" and now < zombie["charge_until"]:
+                speed *= 3.25
+            self.move_zombie(zombie, zombie["move_x"], zombie["move_y"], dt, speed, terrain)
+            if infecting:
+                if distance <= zombie["radius"] + PLAYER_RADIUS + 10:
+                    active_infections.add(target["id"])
+                    progress = self.infection_progress.get(target["id"], 0) + dt
+                    self.infection_progress[target["id"]] = progress
+                    if progress >= 5:
+                        self.infect_player(target)
+                        corpses = [corpse for corpse in corpses if corpse["id"] != target["id"]]
+                continue
             if distance <= zombie["radius"] + PLAYER_RADIUS + 7 and now - zombie["last_attack"] >= .8:
                 zombie["last_attack"] = now
                 self.damage(target, zombie["damage"], "", now)
             if zombie["kind"] == "shooter" and distance < 720 and now - zombie["last_shot"] >= 1.35 and self.path_clear(zombie["x"], zombie["y"], target["x"], target["y"], 5):
                 zombie["last_shot"] = now
                 self.zombie_volley(zombie, target, now)
+            if zombie["kind"] == "vomiter" and distance < 780 and now >= zombie["next_special"] and self.path_clear(zombie["x"], zombie["y"], target["x"], target["y"], 7):
+                zombie["next_special"] = now + 5.2
+                self.zombie_volley(zombie, target, now, kind="vomit", speed=380, damage_scale=.6)
             if zombie.get("boss") and now >= zombie["next_special"]:
+                tier = max(1, self.wave // 5)
+                haste = 1 + (tier - 1) * .1
                 if zombie["kind"] == "plague_lord":
-                    zombie["next_special"] = now + 3.8
-                    self.zombie_volley(zombie, target, now, radial=True, count=12)
+                    zombie["next_special"] = now + 3.8 / haste
+                    self.zombie_volley(zombie, target, now, radial=True, count=min(28, 12 + tier * 2), speed=480 + tier * 18)
+                    self.create_pollution(target["x"], target["y"], now, tier + 1)
                     for player in targets:
-                        if math.hypot(player["x"] - zombie["x"], player["y"] - zombie["y"]) < 190:
-                            self.damage(player, 6 + self.wave, "", now)
+                        if math.hypot(player["x"] - zombie["x"], player["y"] - zombie["y"]) < 190 + tier * 12:
+                            self.damage(player, 8 + self.wave * .8, "", now)
                 elif zombie["kind"] == "brood_queen":
-                    zombie["next_special"] = now + 6
-                    for _ in range(3):
-                        runner = self.spawn_zombie("runner", now)
-                        runner["x"], runner["y"] = zombie["x"] + random.uniform(-55, 55), zombie["y"] + random.uniform(-55, 55)
+                    zombie["next_special"] = now + 6 / haste
+                    for index in range(min(8, 3 + tier)):
+                        summon_kind = "raider" if tier >= 3 and index == 0 else "runner"
+                        self.pending_zombies.append((now + index * .06, summon_kind, None))
+                    self.pending_zombies.sort(key=lambda item: item[0])
+                    self.zombie_volley(zombie, target, now, radial=True, count=min(18, 6 + tier * 2), speed=410)
                 else:
-                    zombie["next_special"] = now + 6.5
-                    zombie["charge_until"] = now + 1.6
-                    self.zombie_volley(zombie, target, now, radial=True, count=8)
+                    zombie["next_special"] = now + 6.5 / haste
+                    zombie["charge_until"] = now + min(3, 1.6 + tier * .18)
+                    self.zombie_volley(zombie, target, now, radial=True, count=min(24, 8 + tier * 2), speed=520 + tier * 20, damage_scale=1.15)
+        valid_infections = {player["id"] for player in corpses}
+        self.infection_progress = {player_id: progress for player_id, progress in self.infection_progress.items()
+                                   if player_id in valid_infections and player_id in active_infections}
 
     def add_bullet(self, bullet):
         bullet["id"] = self.next_bullet_id
@@ -629,7 +920,7 @@ class Room:
 
     def spawn(self, player):
         x, y = self.random_open_position(PLAYER_RADIUS + 15)
-        player.update(x=x, y=y, hp=player.get("max_hp", 100))
+        player.update(x=x, y=y, hp=player.get("max_hp", 100), respawn=0, shot_queued=False)
 
     @staticmethod
     def next_level_score(level):
@@ -642,25 +933,33 @@ class Room:
         if self.mode not in {"upgrade", "bio"} or upgrade not in UPGRADE_MAX_RANKS:
             return False
         ranks = player.setdefault("upgrades", {})
-        if ranks.get(upgrade, 0) >= UPGRADE_MAX_RANKS[upgrade]:
+        if (self.mode != "bio" or upgrade == "arsenal") and ranks.get(upgrade, 0) >= UPGRADE_MAX_RANKS[upgrade]:
             return False
         ranks[upgrade] = ranks.get(upgrade, 0) + 1
         if upgrade == "vitality":
-            player["max_hp"] += 15
-            player["hp"] = min(player["max_hp"], player["hp"] + 15)
+            gain = 15
+            if player.get("last_survivor"):
+                player["last_survivor_base_max_hp"] = player.get("last_survivor_base_max_hp", player["max_hp"] / 2) + gain
+                player["max_hp"] += gain * 2
+                player["hp"] = min(player["max_hp"], player["hp"] + gain * 2)
+            else:
+                player["max_hp"] += gain
+                player["hp"] = min(player["max_hp"], player["hp"] + gain)
         player["upgrade_choices"] = []
+        player.setdefault("effects", {})["invincible"] = max(
+            player.get("effects", {}).get("invincible", 0), time.monotonic() + 5)
         self.check_level_up(player)
         return True
 
     def check_level_up(self, player):
         if self.mode not in {"upgrade", "bio"} or player.get("upgrade_choices"):
             return
-        while player.get("level", 1) < 1 + sum(UPGRADE_MAX_RANKS.values()):
+        while self.mode == "bio" or player.get("level", 1) < 1 + sum(UPGRADE_MAX_RANKS.values()):
             if player.get("xp", player["score"]) < self.next_level_xp(player["level"]):
                 return
             player["level"] += 1
             choices = [kind for kind, maximum in UPGRADE_MAX_RANKS.items()
-                       if player.get("upgrades", {}).get(kind, 0) < maximum]
+                       if self.mode == "bio" and kind != "arsenal" or player.get("upgrades", {}).get(kind, 0) < maximum]
             if not choices:
                 return
             player["upgrade_choices"] = random.sample(choices, min(3, len(choices)))
@@ -680,7 +979,7 @@ class Room:
         if "input" in player:
             player["input"].update(up=False, down=False, left=False, right=False, move_x=0, move_y=0, shoot=False, ability=False)
         player["role"] = role
-        player["max_hp"] = 300 if role == "tank" else 100
+        player["max_hp"] = self.test_settings["player_hp"] * (3 if role == "tank" else 1)
         player["next_weapon"] = now + 20 if role == "weaponmaster" else 0
         player["ability_ready"] = now
         player["ready"] = True
@@ -694,6 +993,92 @@ class Room:
         player["effects"]["invincible"] = now + 7
         player["effects"]["speed"] = max(player["effects"].get("speed", 0), now + 7)
         player["ability_ready"] = now + 20
+        return True
+
+    def infected_melee(self, player, now, damage, reach, cleave=False):
+        angle = finite_number(player.get("input", {}).get("angle"), 0)
+        candidates = []
+        for target in self.humans():
+            if target.get("infected") or target.get("hp", 0) <= 0:
+                continue
+            offset_x, offset_y = target["x"] - player["x"], target["y"] - player["y"]
+            distance = math.hypot(offset_x, offset_y)
+            if distance > reach + PLAYER_RADIUS:
+                continue
+            if not cleave and distance > 0:
+                target_angle = math.atan2(offset_y, offset_x)
+                difference = abs(math.atan2(math.sin(target_angle - angle), math.cos(target_angle - angle)))
+                if difference > .85:
+                    continue
+            candidates.append((distance, target))
+        targets = [target for _, target in candidates] if cleave else [min(candidates, key=lambda item: item[0])[1]] if candidates else []
+        for target in targets:
+            self.damage(target, damage, player["id"], now)
+        effect_x = player["x"] + math.cos(angle) * min(reach * .55, 70)
+        effect_y = player["y"] + math.sin(angle) * min(reach * .55, 70)
+        self.explosions.append({"x": effect_x, "y": effect_y, "radius": reach * (.9 if cleave else .55),
+                                "color": "#9cff57", "life": .16, "magic": True})
+        return bool(targets)
+
+    def activate_infected_ability(self, player, now):
+        if self.mode != "bio" or not player.get("infected") or player.get("choosing_zombie") or player.get("hp", 0) <= 0:
+            return False
+        form = player.get("zombie_form")
+        if form not in INFECTED_ABILITY_COOLDOWNS or now < player.get("ability_ready", 0):
+            return False
+        angle = finite_number(player.get("input", {}).get("angle"), 0)
+        dx, dy = math.cos(angle), math.sin(angle)
+        stats = BOSS_STATS.get(form) or INFECTED_FORM_STATS.get(form)
+
+        def infected_projectile(shot_angle, damage, speed=650, kind="infected", radius=8, life=2.4):
+            self.add_bullet({"x": player["x"], "y": player["y"],
+                             "vx": math.cos(shot_angle) * speed, "vy": math.sin(shot_angle) * speed,
+                             "owner": player["id"], "color": "#9cff57", "damage": damage,
+                             "damage_type": "normal", "radius": radius, "kind": kind,
+                             "bounces": 0, "life": life, "created": now})
+
+        if form == "normal":
+            player["effects"]["infected_frenzy"] = now + 5
+        elif form == "raider":
+            player["effects"]["invincible"] = max(player["effects"].get("invincible", 0), now + .8)
+            for _ in range(12):
+                self.move_player(player, dx * 24, dy * 24)
+        elif form == "shooter":
+            for offset in (-.3, -.2, -.1, 0, .1, .2, .3):
+                infected_projectile(angle + offset, stats["damage"] * 1.25, speed=720)
+        elif form == "giant":
+            for target in self.humans():
+                if not target.get("infected") and target.get("hp", 0) > 0 and math.hypot(target["x"] - player["x"], target["y"] - player["y"]) <= 190:
+                    self.damage(target, 55, player["id"], now)
+            self.explosions.append({"x": player["x"], "y": player["y"], "radius": 190,
+                                    "color": "#9cff57", "life": .35, "magic": True})
+        elif form == "vomiter":
+            self.create_pollution(player["x"] + dx * 190, player["y"] + dy * 190, now,
+                                  max(2, self.wave // 5 + 1))
+        elif form == "plague_lord":
+            tier = max(1, self.wave // 5)
+            for offset in (0, math.tau / 3, math.tau * 2 / 3):
+                self.create_pollution(player["x"] + math.cos(offset) * 210,
+                                      player["y"] + math.sin(offset) * 210, now, tier + 2)
+        elif form == "brood_queen":
+            summon_count = min(8, 3 + max(1, self.wave // 5))
+            for index in range(summon_count):
+                summon_kind = "raider" if index % 2 else "runner"
+                radius = ZOMBIE_STATS[summon_kind]["radius"]
+                position = self.nearby_zombie_spawn_position(player["x"], player["y"], radius, index)
+                self.spawn_zombie(summon_kind, now, position=position)
+            self.explosions.append({"x": player["x"], "y": player["y"], "radius": 175,
+                                    "color": "#ff5ab7", "life": .55, "magic": True})
+        elif form == "iron_abomination":
+            player["effects"]["invincible"] = max(player["effects"].get("invincible", 0), now + 2.5)
+            for _ in range(14):
+                self.move_player(player, dx * 24, dy * 24)
+            for target in self.humans():
+                if not target.get("infected") and target.get("hp", 0) > 0 and math.hypot(target["x"] - player["x"], target["y"] - player["y"]) <= 240:
+                    self.damage(target, 75, player["id"], now)
+            self.explosions.append({"x": player["x"], "y": player["y"], "radius": 240,
+                                    "color": "#c8ff84", "life": .4, "magic": True})
+        player["ability_ready"] = now + INFECTED_ABILITY_COOLDOWNS[form]
         return True
 
     def move_player(self, player, dx, dy):
@@ -715,22 +1100,38 @@ class Room:
     def damage(self, target, amount, owner_id, now, damage_type="normal"):
         if target["hp"] <= 0:
             return
+        if target.get("upgrade_choices"):
+            return
         if target["effects"].get("invincible", 0) > now:
             return
         if target["effects"].get("shield", 0) > now:
             amount *= 0.25 if damage_type == "laser" else 0.5
+        if self.mode == "bio" and target.get("last_survivor") and not target.get("infected"):
+            amount *= 0.5
         target["hp"] -= amount
         if target["hp"] <= 0:
             target["hp"] = 0
-            target["respawn"] = now + 2.5
+            target["respawn"] = math.inf if self.mode == "bio" else now + 2.5
+            if self.mode == "bio" and target.get("infected"):
+                remaining = max(0, int(target.get("zombie_respawns", 0)))
+                target["choosing_zombie"] = remaining > 0
+                target["zombie_respawns"] = max(0, remaining - 1) if remaining > 0 else 0
+                target["zombie_form"] = None
+                target["input"].update(up=False, down=False, left=False, right=False,
+                                       move_x=0, move_y=0, shoot=False, ability=False)
+            elif self.mode == "bio":
+                self.rescue_progress[target["id"]] = 0
             owner = self.players.get(owner_id)
             if owner:
                 owner["score"] += 1
                 if self.mode == "upgrade":
                     owner["xp"] = owner.get("xp", 0) + 1
+                elif self.mode == "bio" and target.get("infected") and not owner.get("infected"):
+                    owner["xp"] = owner.get("xp", 0) + 3
                 if owner.get("role") == "necromancer":
                     self.add_minion(owner, "roam")
-                self.check_level_up(owner)
+                if not owner.get("infected"):
+                    self.check_level_up(owner)
             if self.mode == "profession":
                 target["ready"] = False
                 target["role"] = None
@@ -743,13 +1144,39 @@ class Room:
                 if "input" in target:
                     target["input"].update(up=False, down=False, left=False, right=False, move_x=0, move_y=0, shoot=False, ability=False)
 
+    def update_rescues(self, dt):
+        if self.mode != "bio":
+            return
+        dead_players = [player for player in self.humans() if player["ready"] and player["hp"] <= 0 and not player.get("infected")]
+        dead_ids = {player["id"] for player in dead_players}
+        self.rescue_progress = {player_id: progress for player_id, progress in self.rescue_progress.items()
+                                if player_id in dead_ids}
+        if not self.rescue_enabled:
+            self.rescue_progress.clear()
+            return
+        rescuers = [player for player in self.humans() if player["ready"] and player["hp"] > 0 and not player.get("infected")]
+        for target in dead_players:
+            nearby = any(player["id"] != target["id"] and
+                         math.hypot(player["x"] - target["x"], player["y"] - target["y"]) <= 54
+                         for player in rescuers)
+            progress = self.rescue_progress.get(target["id"], 0)
+            progress = min(10, progress + dt) if nearby else 0
+            if progress < 10:
+                self.rescue_progress[target["id"]] = progress
+                continue
+            target["hp"] = max(1, target["max_hp"] * .25)
+            target["respawn"] = 0
+            target["input"].update(up=False, down=False, left=False, right=False,
+                                   move_x=0, move_y=0, shoot=False, ability=False)
+            self.rescue_progress.pop(target["id"], None)
+
     def apply_pickup(self, player, kind, now):
         if kind == "health":
             player["hp"] = min(player.get("max_hp", 100), player["hp"] + player.get("max_hp", 100) * 0.25)
         elif kind == "minion":
             self.add_minion(player)
         else:
-            player["effects"][kind] = now + POWERUP_DURATION
+            player["effects"][kind] = now + self.test_settings["weapon_duration"]
 
     def explode_cannon(self, bullet, now):
         radius = 115
@@ -758,7 +1185,10 @@ class Room:
         if self.mode == "bio":
             for zombie in self.zombies:
                 if zombie["hp"] > 0 and math.hypot(zombie["x"] - bullet["x"], zombie["y"] - bullet["y"]) < radius + zombie["radius"]:
-                    self.damage_zombie(zombie, 70, bullet["owner"], now)
+                    self.damage_zombie(zombie, bullet["damage"], bullet["owner"], now)
+            for player in self.humans():
+                if player.get("infected") and player["hp"] > 0 and math.hypot(player["x"] - bullet["x"], player["y"] - bullet["y"]) < radius + PLAYER_RADIUS:
+                    self.damage(player, bullet["damage"], bullet["owner"], now, "explosive")
         else:
             for player in self.players.values():
                 if player["id"] != bullet["owner"] and player["hp"] > 0:
@@ -794,8 +1224,13 @@ class Room:
                     orbit = 58 + (index // 6) * 28
                     minion["x"] = owner["x"] + math.cos(minion["angle"] + index * math.tau / max(1, len(minions))) * orbit
                     minion["y"] = owner["y"] + math.sin(minion["angle"] + index * math.tau / max(1, len(minions))) * orbit
-                enemies = ([zombie for zombie in self.zombies if zombie["hp"] > 0] if self.mode == "bio" else
-                           [p for p in self.players.values() if p["id"] != owner["id"] and p["hp"] > 0])
+                if self.mode == "bio":
+                    enemies = [zombie for zombie in self.zombies if zombie["hp"] > 0]
+                    enemies.extend(p for p in self.players.values()
+                                   if p["id"] != owner["id"] and p["hp"] > 0 and p.get("infected"))
+                else:
+                    enemies = [p for p in self.players.values()
+                               if p["id"] != owner["id"] and p["hp"] > 0]
                 if not enemies:
                     continue
                 target = min(enemies, key=lambda p: math.hypot(p["x"] - minion["x"], p["y"] - minion["y"]))
@@ -882,7 +1317,9 @@ class Room:
                 if 0 < along < distance and side < zombie["radius"] + 7:
                     damaged.add(marker)
                     self.damage_zombie(zombie, damage, player["id"], now)
-            for target in self.players.values() if self.mode != "bio" else ():
+            laser_targets = (self.players.values() if self.mode != "bio" else
+                             (target for target in self.players.values() if target.get("infected")))
+            for target in laser_targets:
                 if target["id"] == player["id"] or target["id"] in damaged or target["hp"] <= 0:
                     continue
                 along = (target["x"] - start_x) * dx + (target["y"] - start_y) * dy
@@ -923,15 +1360,18 @@ class Room:
     def update(self, dt, now):
         self.restore_terrain(now)
         self.update_bots(now)
+        self.update_last_survivor(now)
         self.update_zombies(dt, now)
+        self.update_hazards(dt, now)
         for p in self.players.values():
-            if not p["ready"]:
+            if not p["ready"] or p.get("choosing_zombie"):
                 continue
             if p["hp"] <= 0:
-                if now >= p["respawn"]:
+                if self.mode != "bio" and now >= p["respawn"]:
                     self.spawn(p)
                 continue
-            if not p.get("is_bot") and now - p.get("last_input", now) > 0.75:
+            # 客户端输入由独立定时器续传；保留更宽松的网络容错，避免低帧率时移动和连射被误判为松开。
+            if not p.get("is_bot") and now - p.get("last_input", now) > 4:
                 p["input"].update(up=False, down=False, left=False, right=False,
                                   move_x=0, move_y=0, shoot=False, ability=False)
             dx = p["input"].get("move_x", p["input"]["right"] - p["input"]["left"])
@@ -940,7 +1380,14 @@ class Room:
             if length > 1:
                 dx, dy = dx / length, dy / length
             upgrade_ranks = p.get("upgrades", {}) if self.mode in {"upgrade", "bio"} else {}
-            speed = PLAYER_SPEED * (1.45 if p["effects"].get("speed", 0) > now else 1) * (1 + .06 * upgrade_ranks.get("agility", 0))
+            infected_stats = (BOSS_STATS.get(p.get("zombie_form")) or INFECTED_FORM_STATS.get(p.get("zombie_form"))) if p.get("infected") else None
+            agility_bonus = min(.8, .05 * upgrade_ranks.get("agility", 0)) if self.mode == "bio" else .06 * upgrade_ranks.get("agility", 0)
+            speed = (infected_stats.get("speed", 80) * (2.2 if p.get("zombie_form") in BOSS_STATS else 1) if infected_stats else PLAYER_SPEED)
+            speed *= (1.45 if p["effects"].get("speed", 0) > now else 1) * (1 + agility_bonus)
+            if p["effects"].get("infected_frenzy", 0) > now:
+                speed *= 1.45
+            if p.get("last_survivor") and not p.get("infected"):
+                speed *= 1.35
             self.move_player(p, dx * speed * dt, dy * speed * dt)
             rapid = p["effects"].get("rapid", 0) > now
             cannon = p["effects"].get("cannon", 0) > now
@@ -958,35 +1405,67 @@ class Room:
                 cannon = weapon == "cannon"
                 laser = weapon == "laser"
                 beam = weapon == "beam"
-            if role == "paladin" and p["input"].get("ability"):
-                self.activate_paladin(p, now)
-            cooldown = 1.25 if cannon else 0.09 if beam else 0.55 if laser else 0.5 if role == "mage" else 0.7 if role == "sniper" else 0.11 if rapid else 0.24
-            cooldown *= .9 ** upgrade_ranks.get("haste", 0)
-            if p["input"]["shoot"] and now - p["last_shot"] >= cooldown:
+            if p["input"].get("ability"):
+                if p.get("infected"):
+                    self.activate_infected_ability(p, now)
+                elif role == "paladin":
+                    self.activate_paladin(p, now)
+            cooldown = infected_stats.get("cooldown", .65) if infected_stats else 1.25 if cannon else 0.09 if beam else 0.55 if laser else 0.5 if role == "mage" else 0.7 if role == "sniper" else 0.11 if rapid else 0.24
+            cooldown *= max(.32, .9 ** upgrade_ranks.get("haste", 0)) if self.mode == "bio" else .9 ** upgrade_ranks.get("haste", 0)
+            if p.get("last_survivor") and not p.get("infected"):
+                cooldown *= .4
+            if (p["input"]["shoot"] or p.get("shot_queued", False)) and now - p["last_shot"] >= cooldown:
+                p["shot_queued"] = False
                 p["last_shot"] = now
                 angle = p["input"]["angle"]
-                if cannon:
+                if infected_stats:
+                    form = p.get("zombie_form")
+                    infected_damage = infected_stats["damage"] * (1.5 if p["effects"].get("infected_frenzy", 0) > now else 1)
+                    if form in {"normal", "raider"}:
+                        self.infected_melee(p, now, infected_damage, 95 if form == "normal" else 82)
+                    elif form == "giant":
+                        self.infected_melee(p, now, infected_damage, 145, cleave=True)
+                    elif form == "iron_abomination":
+                        self.infected_melee(p, now, infected_damage, 175, cleave=True)
+                    else:
+                        projectile_kind = "infected_vomit" if form in {"vomiter", "plague_lord"} else "infected"
+                        count = 5 if form == "plague_lord" else 3 if form == "brood_queen" else 1
+                        spread = .18
+                        for index in range(count):
+                            shot_angle = angle + (index - (count - 1) / 2) * spread
+                            projectile_speed = 390 if projectile_kind == "infected_vomit" else 680 if form == "shooter" else 560
+                            self.add_bullet({"x": p["x"], "y": p["y"], "vx": math.cos(shot_angle) * projectile_speed,
+                                             "vy": math.sin(shot_angle) * projectile_speed,
+                                             "owner": p["id"], "color": "#9cff57", "damage": infected_damage,
+                                             "damage_type": "normal", "radius": 10 if projectile_kind == "infected_vomit" else 7,
+                                             "kind": projectile_kind, "bounces": 0, "life": 3, "created": now})
+                elif cannon:
+                    cannon_damage_multiplier = (1.6 if p["effects"].get("damage", 0) > now else 1) * (1 + (.09 if self.mode == "bio" else .1) * upgrade_ranks.get("power", 0))
                     self.add_bullet({"x": p["x"], "y": p["y"],
                                      "vx": math.cos(angle) * 430, "vy": math.sin(angle) * 430,
-                                     "owner": p["id"], "color": p["color"], "damage": 70,
+                                     "owner": p["id"], "color": p["color"], "damage": self.test_settings["cannon_damage"] * cannon_damage_multiplier * (5 if self.mode == "bio" else 1) * (1.6 if p.get("last_survivor") else 1),
                                      "damage_type": "explosive", "radius": 18, "kind": "cannon",
                                      "bounces": 0, "life": 3, "created": now})
                 elif laser:
-                    self.fire_laser(p, angle, now, 50)
+                    self.fire_laser(p, angle, now, self.test_settings["laser_damage"] * (1.6 if self.mode == "bio" else 1) * (1.6 if p.get("last_survivor") else 1))
                 elif beam:
-                    self.fire_laser(p, angle, now, 8, beam=True)
+                    self.fire_laser(p, angle, now, self.test_settings["beam_damage"] * (1.5 if self.mode == "bio" else 1) * (1.6 if p.get("last_survivor") else 1), beam=True)
                 else:
                     arsenal_rank = upgrade_ranks.get("arsenal", 0)
                     angles = ((angle - 0.16, angle, angle + 0.16) if p["effects"].get("multishot", 0) > now else
                               (angle - .08, angle + .08) if arsenal_rank == 1 else
                               (angle - .13, angle, angle + .13) if arsenal_rank >= 2 else (angle,))
-                    damage = (40 if p["effects"].get("damage", 0) > now else 25) * (1 + .1 * upgrade_ranks.get("power", 0))
+                    base_damage = self.test_settings["bullet_damage"]
+                    damage = (base_damage * 1.6 if p["effects"].get("damage", 0) > now else base_damage) * (1 + (.09 if self.mode == "bio" else .1) * upgrade_ranks.get("power", 0))
+                    if p.get("last_survivor") and not p.get("infected"):
+                        damage *= 1.6
                     if arsenal_rank:
                         damage *= .82 if arsenal_rank == 1 else .72
                     for shot_angle in angles:
                         bullet_kind = "mage" if role == "mage" else "sniper" if role == "sniper" else "bullet"
                         bullet_damage = 37.5 if role == "mage" else 75 if role == "sniper" else damage
-                        bullet_speed = (1200 if role == "sniper" else 700 if role == "mage" else BULLET_SPEED) * (1 + .1 * upgrade_ranks.get("velocity", 0))
+                        velocity_bonus = min(1.2, .075 * upgrade_ranks.get("velocity", 0)) if self.mode == "bio" else .1 * upgrade_ranks.get("velocity", 0)
+                        bullet_speed = (1200 if role == "sniper" else 700 if role == "mage" else BULLET_SPEED) * (1 + velocity_bonus)
                         bullet_radius = 9 if role == "mage" else 5 if role == "sniper" else 6
                         self.add_bullet({"x": p["x"], "y": p["y"],
                                          "vx": math.cos(shot_angle) * bullet_speed,
@@ -996,11 +1475,12 @@ class Room:
                                          "bounces": 3 if p["effects"].get("ricochet", 0) > now else 0,
                                          "life": 2.5, "created": now})
 
-            for pickup in self.pickups:
+            for pickup in self.pickups if not p.get("infected") else ():
                 if pickup["active"] and math.hypot(p["x"] - pickup["x"], p["y"] - pickup["y"]) < 45:
                     self.apply_pickup(p, pickup["kind"], now)
                     pickup["active"] = False
 
+        self.update_rescues(dt)
         self.sync_pickups()
         self.update_minions(dt, now)
 
@@ -1010,6 +1490,8 @@ class Room:
             if b["life"] <= 0:
                 if b["kind"] == "cannon":
                     self.explode_cannon(b, now)
+                elif b["kind"] in {"vomit", "infected_vomit"}:
+                    self.create_pollution(b["x"], b["y"], now, max(1, self.wave // 5))
                 continue
             previous_x, previous_y = b["x"], b["y"]
             hit = not self.advance_bullet(b, dt)
@@ -1017,8 +1499,9 @@ class Room:
                 self.explode_cannon(b, now)
             elif hit and b["kind"] == "mage":
                 self.explode_magic(b, now)
+            hostile_bio_projectile = b["kind"] in {"zombie", "vomit", "infected", "infected_vomit"}
             if not hit:
-                if self.mode == "bio" and b["kind"] != "zombie":
+                if self.mode == "bio" and not hostile_bio_projectile:
                     zombie = next((zombie for zombie in self.zombies if zombie["hp"] > 0 and
                                    segment_hits_circle(previous_x, previous_y, b["x"], b["y"], zombie["x"], zombie["y"], zombie["radius"] + b["radius"])), None)
                     if zombie:
@@ -1027,6 +1510,12 @@ class Room:
                         else:
                             self.damage_zombie(zombie, b["damage"], b["owner"], now)
                         hit = True
+                    if not hit:
+                        infected_target = next((player for player in self.humans() if player.get("infected") and player["hp"] > 0 and
+                                                segment_hits_circle(previous_x, previous_y, b["x"], b["y"], player["x"], player["y"], PLAYER_RADIUS + b["radius"])), None)
+                        if infected_target:
+                            self.damage(infected_target, b["damage"], b["owner"], now, b["damage_type"])
+                            hit = True
             if not hit and self.mode != "bio":
                 for owner in self.players.values():
                     if owner["id"] == b["owner"]:
@@ -1043,11 +1532,13 @@ class Room:
                         hit = True
                         break
             if hit:
+                if b["kind"] in {"vomit", "infected_vomit"}:
+                    self.create_pollution(b["x"], b["y"], now, max(1, self.wave // 5))
                 continue
-            for p in self.players.values() if self.mode != "bio" or b["kind"] == "zombie" else ():
+            for p in self.players.values() if self.mode != "bio" or hostile_bio_projectile else ():
                 player_hit = (segment_hits_circle(previous_x, previous_y, b["x"], b["y"], p["x"], p["y"], PLAYER_RADIUS + b["radius"])
                               if self.mode == "bio" else math.hypot(p["x"] - b["x"], p["y"] - b["y"]) < PLAYER_RADIUS + b["radius"])
-                if p["id"] != b["owner"] and p["hp"] > 0 and player_hit:
+                if p["id"] != b["owner"] and p["hp"] > 0 and not p.get("infected") and player_hit:
                     if b["kind"] == "cannon":
                         self.explode_cannon(b, now)
                     elif b["kind"] == "mage":
@@ -1056,6 +1547,8 @@ class Room:
                         self.damage(p, b["damage"], b["owner"], now, b["damage_type"])
                     hit = True
                     break
+            if hit and b["kind"] in {"vomit", "infected_vomit"}:
+                self.create_pollution(b["x"], b["y"], now, max(1, self.wave // 5))
             if not hit and b["life"] > 0 and 0 < b["x"] < self.width and 0 < b["y"] < self.height:
                 alive.append(b)
         self.bullets = alive
@@ -1068,14 +1561,21 @@ class Room:
 
     async def broadcast(self):
         now = time.monotonic()
-        payload = json.dumps({"type": "state", "server_time": round(now * 1000, 3), "players": [
+        payload = json.dumps({"type": "state", "server_time": round(now * 1000, 3),
+                              "host_id": self.host_id, "test": self.test_settings, "players": [
             {**{k: p[k] for k in ("id", "name", "max_hp", "score", "color", "role", "ready")},
              "bot": p.get("is_bot", False),
              "bot_difficulty": "hard" if p.get("is_bot") else None,
              "level": p.get("level", 1), "xp": p.get("xp", p.get("score", 0)), "upgrades": p.get("upgrades", {}),
              "upgrade_choices": p.get("upgrade_choices", []),
-             "next_level_score": self.next_level_xp(p.get("level", 1)) if p.get("level", 1) < 1 + sum(UPGRADE_MAX_RANKS.values()) else None,
+             "upgrading": bool(p.get("upgrade_choices")),
+             "next_level_score": self.next_level_xp(p.get("level", 1)) if self.mode == "bio" or p.get("level", 1) < 1 + sum(UPGRADE_MAX_RANKS.values()) else None,
              "x": round(p["x"], 1), "y": round(p["y"], 1), "hp": round(p["hp"], 1),
+             "rescue_progress": round(self.rescue_progress.get(p["id"], 0), 1) if self.mode == "bio" else 0,
+             "infection_progress": round(self.infection_progress.get(p["id"], 0), 1) if self.mode == "bio" else 0,
+             "infected": p.get("infected", False), "choosing_zombie": p.get("choosing_zombie", False),
+             "zombie_form": p.get("zombie_form"), "zombie_respawns": p.get("zombie_respawns", 0),
+             "boss_used_wave": p.get("boss_used_wave", 0), "last_survivor": p.get("last_survivor", False),
              "input_seq": p.get("input_seq", -1),
              "move_x": round(p["input"].get("move_x", 0), 3), "move_y": round(p["input"].get("move_y", 0), 3),
              "effects": {kind: round(expires - now, 1) for kind, expires in p["effects"].items() if expires > now},
@@ -1095,15 +1595,22 @@ class Room:
            "explosions": [{k: round(value, 1) if k in {"x", "y", "radius", "life"} else value
                             for k, value in explosion.items()} for explosion in self.explosions],
            "pickups": [p for p in self.pickups if p["active"]],
-           "zombies": [{"id": zombie["id"], "kind": zombie["kind"], "boss": zombie["boss"],
+           "zombies": [{"id": zombie["id"], "kind": "normal" if zombie.get("disguised") and not zombie.get("revealed") else zombie["kind"], "boss": zombie["boss"],
                          "boss_name": zombie.get("boss_name"), "x": round(zombie["x"], 1), "y": round(zombie["y"], 1),
                          "hp": round(zombie["hp"], 1), "max_hp": zombie["max_hp"], "radius": zombie["radius"],
                          "move_x": round(zombie.get("move_x", 0), 3), "move_y": round(zombie.get("move_y", 0), 3)}
                         for zombie in self.zombies if zombie["hp"] > 0],
+           "hazards": [{"id": hazard["id"], "x": round(hazard["x"], 1), "y": round(hazard["y"], 1),
+                        "radius": round(hazard["radius"], 1), "life": round(max(0, hazard["expires"] - now), 1)}
+                       for hazard in self.hazards],
            "bio": {"wave": self.wave, "active": self.wave_active,
-                   "remaining": sum(1 for zombie in self.zombies if zombie["hp"] > 0),
+                   "remaining": sum(1 for zombie in self.zombies if zombie["hp"] > 0) + len(self.pending_zombies),
                    "next_wave": max(0, round(self.next_wave - now, 1)) if not self.wave_active else 0,
-                   "boss": next((zombie.get("boss_name") for zombie in self.zombies if zombie.get("boss") and zombie["hp"] > 0), None)} if self.mode == "bio" else None,
+                   "boss": next((zombie.get("boss_name") for zombie in self.zombies if zombie.get("boss") and zombie["hp"] > 0), None),
+                   "host_id": self.host_id, "rescue_enabled": self.rescue_enabled,
+                   "infected_players": sum(1 for player in self.humans() if player.get("infected")),
+                   "survivor_players": sum(1 for player in self.humans() if not player.get("infected")),
+                   "boss_tier": max(1, self.wave // 5) if self.wave >= 5 else 0} if self.mode == "bio" else None,
            "destroyed": [[block["id"], max(0, round(block["restore"] - now, 1))]
                          for block in self.terrain if not block["active"]]},
                          ensure_ascii=False, separators=(",", ":"))
@@ -1146,8 +1653,10 @@ async def websocket(request):
         pid = secrets.token_hex(4)
         ready = mode != "profession"
         player = {"id": pid, "name": str(first.get("name", "玩家"))[:12] or "玩家", "x": 0, "y": 0,
-                  "hp": 0, "max_hp": 100, "score": 0, "color": room.next_player_color(), "ws": ws, "is_bot": False, "last_shot": 0,
+                  "hp": 0, "max_hp": room.test_settings["player_hp"], "score": 0, "color": room.next_player_color(), "ws": ws, "is_bot": False, "last_shot": 0,
                   "respawn": 0, "effects": {}, "minions": [], "role": None, "ready": ready,
+                  "infected": False, "choosing_zombie": False, "zombie_form": None, "zombie_respawns": 0, "boss_used_wave": 0,
+                  "last_survivor": False,
                   "next_weapon": 0, "ability_ready": 0, "master_weapon": None, "last_chat": 0,
                   "level": 1, "xp": 0, "upgrades": {}, "upgrade_choices": [],
                   "last_input": time.monotonic(), "input_seq": -1,
@@ -1155,6 +1664,8 @@ async def websocket(request):
         if ready:
             room.spawn(player)
         room.players[pid] = player
+        if room.host_id is None or room.host_id not in room.players:
+            room.host_id = pid
         room.sync_solo_bot()
         print_room_population(f"玩家 {player['name']} 加入 {code}")
         now = time.monotonic()
@@ -1172,8 +1683,11 @@ async def websocket(request):
                         continue
                     player["input_seq"] = sequence
                     inp = player["input"]
+                    was_shooting = inp.get("shoot", False)
                     for key in ("up", "down", "left", "right", "shoot", "ability"):
                         inp[key] = bool(data.get(key))
+                    if inp["shoot"] and not was_shooting:
+                        player["shot_queued"] = True
                     move_x = finite_number(data.get("move_x"), inp["right"] - inp["left"])
                     move_y = finite_number(data.get("move_y"), inp["down"] - inp["up"])
                     move_length = math.hypot(move_x, move_y)
@@ -1191,8 +1705,25 @@ async def websocket(request):
                     choice = str(data.get("upgrade", ""))
                     if choice in player.get("upgrade_choices", []):
                         room.apply_upgrade(player, choice)
+                elif data.get("type") == "select_zombie":
+                    room.select_zombie_form(player, str(data.get("form", "")))
                 elif data.get("type") == "ability":
-                    room.activate_paladin(player, time.monotonic())
+                    now = time.monotonic()
+                    if player.get("infected"):
+                        room.activate_infected_ability(player, now)
+                    else:
+                        room.activate_paladin(player, now)
+                elif data.get("type") == "toggle_rescue":
+                    if room.mode == "bio" and room.host_id == player["id"]:
+                        room.rescue_enabled = bool(data.get("enabled"))
+                        if not room.rescue_enabled:
+                            room.rescue_progress.clear()
+                elif data.get("type") == "test_settings":
+                    if room.host_id == player["id"] and isinstance(data.get("values"), dict):
+                        room.apply_test_settings(data["values"])
+                elif data.get("type") == "test_infect_self":
+                    if room.mode == "bio" and room.host_id == player["id"] and not player.get("infected"):
+                        room.infect_player(player)
                 elif data.get("type") == "chat":
                     now = time.monotonic()
                     message = " ".join(str(data.get("message", "")).split())[:CHAT_MAX_LENGTH]
@@ -1208,6 +1739,9 @@ async def websocket(request):
     finally:
         if room and player:
             room.players.pop(player["id"], None)
+            room.rescue_progress.pop(player["id"], None)
+            if room.host_id == player["id"]:
+                room.host_id = next((member["id"] for member in room.humans()), None)
             room.sync_solo_bot()
             if not room.humans():
                 rooms.pop(room.code, None)
@@ -1231,6 +1765,7 @@ async def room_list(_):
         if not human_count:
             continue
         public_rooms.append({"code": code, "mode": room.mode, "players": human_count,
+                             "infected": sum(1 for player in room.humans() if player.get("infected")),
                              "bots": len(room.bots()), "capacity": 12})
     return web.json_response({"rooms": public_rooms})
 

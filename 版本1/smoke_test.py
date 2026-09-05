@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import os
 import time
 import uuid
@@ -78,7 +79,7 @@ async def main():
     motion_room.players = {"motion": motion_player}
     motion_room.update(0.1, motion_now)
     assert abs(motion_player["x"] - 115) < 0.01, "模拟摇杆力度被错误转换成满速"
-    motion_player["last_input"], before_timeout = motion_now - 1, motion_player["x"]
+    motion_player["last_input"], before_timeout = motion_now - 5, motion_player["x"]
     motion_room.update(0.1, motion_now)
     assert motion_player["x"] == before_timeout and motion_player["input"]["move_x"] == 0, "输入超时后玩家仍在移动"
     motion_room.task.cancel()
@@ -152,9 +153,17 @@ async def main():
     upgrade_room.players = {"upgrader": upgrade_player}
     upgrade_room.check_level_up(upgrade_player)
     assert upgrade_player["level"] == 2 and len(upgrade_player["upgrade_choices"]) == 3, "首次升级没有提供三个强化选项"
+    upgrade_room.damage(upgrade_player, 999, "enemy", time.monotonic())
+    assert upgrade_player["hp"] == 70, "玩家在升级选择期间没有获得无敌"
     upgrade_player["upgrade_choices"] = ["vitality"]
+    selected_at = time.monotonic()
     assert upgrade_room.apply_upgrade(upgrade_player, "vitality")
     assert upgrade_player["max_hp"] == 115 and upgrade_player["hp"] == 85 and upgrade_player["upgrades"]["vitality"] == 1, "生命强化数值错误"
+    assert upgrade_player["effects"]["invincible"] >= selected_at + 4.9, "完成升级选择后没有获得 5 秒无敌"
+    upgrade_room.damage(upgrade_player, 5, "enemy", selected_at + 1)
+    assert upgrade_player["hp"] == 85, "完成升级选择后的 5 秒内仍然受到伤害"
+    upgrade_room.damage(upgrade_player, 5, "enemy", selected_at + 6)
+    assert upgrade_player["hp"] == 80, "升级保护超过 5 秒后仍未解除"
     assert [upgrade_room.next_level_score(level) for level in range(1, 6)] == [1, 3, 6, 10, 15], "升级经验曲线不是逐级提高"
     upgrade_player["upgrades"].update(power=3, haste=3, agility=3, velocity=3, arsenal=2)
     upgrade_player["input"].update(move_x=1, shoot=True)
@@ -166,6 +175,11 @@ async def main():
     assert all(abs(bullet["damage"] - 23.4) < .01 and abs((bullet["vx"] ** 2 + bullet["vy"] ** 2) ** .5 - 988) < .1 for bullet in upgrade_room.bullets), "火力、弹速或多发平衡数值错误"
     upgrade_room.update(.01, upgrade_now + .18)
     assert len(upgrade_room.bullets) == 6, "快速装填没有缩短射击间隔"
+    upgrade_player["last_input"] = upgrade_now
+    upgrade_room.update(.01, upgrade_now + .9)
+    assert upgrade_player["input"]["shoot"], "短暂网络或渲染卡顿错误中断了持续射击"
+    upgrade_room.update(.01, upgrade_now + 4.1)
+    assert not upgrade_player["input"]["shoot"], "输入连接长时间中断后仍持续射击"
     upgrade_room.task.cancel()
 
     bio_room = Room("BIO_UNIT", "bio")
@@ -177,8 +191,21 @@ async def main():
     assert bio_room.width == 2800 and bio_room.height == 1800 and len(bio_room.terrain) > len(unit_room.terrain), "生化模式没有使用大型复杂地图"
     assert not bio_room.bots(), "生化模式错误加入了对战困难人机"
     bio_now = time.monotonic()
+
+    def release_bio_spawns(room, start):
+        for step in range(80):
+            if not room.pending_zombies:
+                break
+            room.update_zombies(0, start + step * .12)
+        assert not room.pending_zombies, "生化模式的分批生成队列没有正常清空"
+
     bio_room.start_bio_wave(bio_now)
-    assert bio_room.wave == 1 and bio_room.wave_active and len(bio_room.zombies) >= 7, "生化模式首波没有生成足够僵尸"
+    planned_count = len(bio_room.pending_zombies)
+    assert bio_room.wave == 1 and bio_room.wave_active and not bio_room.zombies and planned_count >= 7, "生化模式首波生成计划不正确"
+    bio_room.update_zombies(0, bio_now)
+    assert 0 < len(bio_room.zombies) <= 2 and len(bio_room.pending_zombies) < planned_count, "生化模式仍在单帧生成全部僵尸"
+    release_bio_spawns(bio_room, bio_now + .12)
+    assert len(bio_room.zombies) >= 7, "生化模式首波没有生成足够僵尸"
     zombie = bio_room.zombies[0]
     bio_room.damage_zombie(zombie, zombie["hp"], "survivor", bio_now)
     assert bio_player["score"] == 1 and bio_player["xp"] == zombie["xp"], "击杀僵尸没有获得击杀数或经验"
@@ -197,21 +224,183 @@ async def main():
                          "kind": "zombie", "bounces": 0, "life": 1, "created": bio_now})
     bio_room.update(.01, bio_now + .2)
     assert teammate["hp"] == 90, "僵尸远程弹没有伤害玩家"
-    bio_room.wave, bio_room.zombies = 4, []
+    bio_room.damage(teammate, 999, "z999", bio_now + .3)
+    assert teammate["hp"] == 0 and math.isinf(teammate["respawn"]), "生化模式阵亡玩家仍被安排复活"
+    bio_room.update(.01, bio_now + 30)
+    assert teammate["hp"] == 0, "生化模式阵亡玩家等待后错误复活"
+    bio_room.host_id, bio_room.rescue_enabled = "survivor", True
+    bio_player["x"], bio_player["y"] = teammate["x"], teammate["y"]
+    bio_room.update_rescues(5)
+    assert teammate["hp"] == 0 and bio_room.rescue_progress["teammate"] == 5, "站在尸体附近没有累计救援进度"
+    bio_player["x"] += 100
+    bio_room.update_rescues(.1)
+    assert bio_room.rescue_progress["teammate"] == 0, "离开尸体后救援进度没有清零"
+    bio_player["x"], bio_player["y"] = teammate["x"], teammate["y"]
+    bio_room.update_rescues(10)
+    assert teammate["hp"] == 25 and "teammate" not in bio_room.rescue_progress, "连续救援 10 秒后没有原地以四分之一生命复活"
+    bio_room.wave, bio_room.zombies, bio_room.pending_zombies = 4, [], []
     bio_room.start_bio_wave(bio_now + 1)
+    release_bio_spawns(bio_room, bio_now + 1)
     assert bio_room.wave == 5 and any(zombie["boss"] and zombie["kind"] in {"plague_lord", "brood_queen", "iron_abomination"} for zombie in bio_room.zombies), "第五波没有刷新随机 Boss"
     bio_room.task.cancel()
 
     bio_scale_room = Room("BIO_SCALE", "bio")
     bio_scale_room.players = {"one": bio_player, "two": {**bio_player, "id": "two", "name": "队友"}}
     bio_scale_room.start_bio_wave(bio_now)
+    release_bio_spawns(bio_scale_room, bio_now)
     assert len(bio_scale_room.zombies) > 7 and max(zombie["max_hp"] for zombie in bio_scale_room.zombies) > 65, "联机人数没有提高生化波次数量和生命强度"
     bio_scale_room.task.cancel()
+
+    infected_scale_room = Room("BIO_INFECTED_SCALE", "bio")
+    infected_copy = {**bio_player, "id": "infected-scale", "infected": True, "zombie_form": "normal",
+                     "input": {**bio_player["input"]}}
+    infected_scale_room.players = {"one": bio_player, "infected-scale": infected_copy}
+    infected_scale_room.start_bio_wave(bio_now)
+    assert len(infected_scale_room.pending_zombies) == planned_count, "感染玩家仍被计入波次数量强度"
+    infected_scale_room.wave = 1
+    scaled_normal = infected_scale_room.spawn_zombie("normal", bio_now)
+    assert scaled_normal["max_hp"] == 65, "感染玩家仍提高了僵尸生命强度"
+    infected_scale_room.task.cancel()
+
+    player_infection_room = Room("PLAYER_INFECTION", "bio")
+    infection_victim = {**bio_player, "id": "infection-victim", "x": 700, "y": 700,
+                        "hp": 0, "max_hp": 100, "infected": False, "choosing_zombie": False,
+                        "effects": {}, "minions": [], "input": {**bio_player["input"]}}
+    infection_carrier = {**bio_player, "id": "infection-carrier", "x": 730, "y": 700,
+                         "hp": 110, "max_hp": 110, "infected": True, "choosing_zombie": False,
+                         "zombie_form": "normal", "effects": {}, "minions": [],
+                         "input": {**bio_player["input"]}}
+    player_infection_room.players = {infection_victim["id"]: infection_victim,
+                                     infection_carrier["id"]: infection_carrier}
+    player_infection_room.wave_active = False
+    player_infection_room.next_wave = bio_now + 100
+    player_infection_room.update_zombies(5.1, bio_now + .1)
+    assert infection_victim["infected"] and infection_victim["choosing_zombie"], "感染玩家靠近尸体 5 秒后没有完成感染"
+    player_infection_room.task.cancel()
+
+    bio_mechanics = Room("BIO_MECHANICS", "bio")
+    survivor = {**bio_player, "id": "mechanic-survivor", "x": 1000, "y": 800, "hp": 100, "max_hp": 100,
+                "effects": {}, "minions": [], "upgrades": {"power": 3}, "upgrade_choices": ["power"],
+                "infected": False, "input": {**bio_player["input"]}}
+    corpse = {**survivor, "id": "mechanic-corpse", "x": 1200, "y": 800, "hp": 0,
+              "upgrades": {}, "upgrade_choices": [], "input": {**survivor["input"]}}
+    bio_mechanics.players = {survivor["id"]: survivor, corpse["id"]: corpse}
+    assert bio_mechanics.apply_upgrade(survivor, "power") and survivor["upgrades"]["power"] == 4, "生化模式仍限制重复强化等级"
+    bio_mechanics.apply_test_settings({"player_hp": 180, "bullet_damage": 42, "weapon_duration": 22,
+                                       "zombie_hp_scale": 2, "zombie_damage_scale": 1.5})
+    assert bio_mechanics.test_settings["bullet_damage"] == 42 and survivor["max_hp"] == 180, "房主测试参数没有应用到房间"
+    bio_mechanics.wave, bio_mechanics.wave_active, bio_mechanics.next_wave = 11, True, bio_now + 100
+    raider = bio_mechanics.spawn_zombie("raider", bio_now)
+    assert raider["disguised"] and not raider["revealed"], "第 11 波后的突袭者没有伪装"
+    raider["x"], raider["y"] = survivor["x"] + 200, survivor["y"]
+    bio_mechanics.update_zombies(.01, bio_now + .1)
+    assert raider["revealed"] and raider["charge_until"] > bio_now, "突袭者接近玩家后没有显形突袭"
+    infector = bio_mechanics.spawn_zombie("infector", bio_now)
+    infector["x"], infector["y"] = corpse["x"], corpse["y"]
+    bio_mechanics.zombies = [infector]
+    bio_mechanics.update_zombies(5.1, bio_now + .2)
+    assert corpse["infected"] and corpse["choosing_zombie"] and corpse["zombie_respawns"] == 3, "感染者没有在尸体旁持续 5 秒后感染玩家"
+    assert bio_mechanics.select_zombie_form(corpse, "vomiter") and corpse["hp"] == corpse["max_hp"], "感染玩家无法选择僵尸形态"
+    corpse["input"]["angle"] = 0
+    hazards_before = len(bio_mechanics.hazards)
+    assert bio_mechanics.activate_infected_ability(corpse, bio_now + .25) and len(bio_mechanics.hazards) > hazards_before, "呕吐感染体无法释放污染技能"
+    bio_mechanics.damage(corpse, 9999, survivor["id"], bio_now + .3)
+    assert corpse["choosing_zombie"] and corpse["zombie_respawns"] == 2, "感染玩家没有消耗本波复活机会"
+    corpse["effects"]["infected_frenzy"] = bio_now + 20
+    assert bio_mechanics.select_zombie_form(corpse, "giant") and corpse["max_hp"] == 1040 and corpse["hp"] == 1040, "巨型感染者生命没有同时继承波次和房主倍率或切换后未回满生命"
+    assert "infected_frenzy" not in corpse["effects"] and not corpse["input"]["shoot"], "切换感染形态后仍残留旧形态技能或攻击输入"
+    corpse.update(choosing_zombie=True, hp=17)
+    assert bio_mechanics.select_zombie_form(corpse, "normal") and corpse["max_hp"] == 440 and corpse["hp"] == 440, "更换感染形态没有按当前波次和房主倍率恢复完整生命"
+    corpse["hp"] = 110
+    bio_mechanics.start_bio_wave(bio_now + .4)
+    assert bio_mechanics.wave == 12 and corpse["max_hp"] == 462 and math.isclose(corpse["hp"], 115.5), "存活感染玩家进入下一波时没有按比例提高生命"
+    bio_mechanics.pending_zombies.clear()
+    corpse.update(choosing_zombie=True, hp=0)
+    bio_mechanics.wave = 15
+    assert bio_mechanics.select_zombie_form(corpse, "plague_lord") and corpse["boss_used_wave"] == 15, "感染玩家在 Boss 波无法扮演 Boss"
+    corpse["choosing_zombie"], corpse["hp"] = True, 0
+    assert not bio_mechanics.select_zombie_form(corpse, "brood_queen"), "感染玩家同一 Boss 波重复扮演 Boss"
+    queen_player = {**corpse, "id": "queen-player", "zombie_form": "brood_queen",
+                    "choosing_zombie": False, "hp": 578, "max_hp": 578,
+                    "ability_ready": 0, "effects": {},
+                    "input": {**corpse["input"], "angle": 0}}
+    bio_mechanics.players[queen_player["id"]] = queen_player
+    zombies_before = len(bio_mechanics.zombies)
+    assert bio_mechanics.activate_infected_ability(queen_player, bio_now + .5), "巢群女王技能无法触发"
+    summoned = bio_mechanics.zombies[zombies_before:]
+    assert len(summoned) == 6 and all(math.hypot(zombie["x"] - queen_player["x"], zombie["y"] - queen_player["y"]) < 300 for zombie in summoned), "巢群女王没有在身边立即召唤随强度增加的尸潮"
+    assert any(explosion.get("color") == "#ff5ab7" for explosion in bio_mechanics.explosions), "巢群女王召唤技能缺少可见反馈"
+    boss = bio_mechanics.spawn_zombie("boss", bio_now, "plague_lord")
+    boss["x"], boss["y"], boss["next_special"] = survivor["x"] + 300, survivor["y"], 0
+    bio_mechanics.zombies = [boss]
+    bio_mechanics.update_zombies(.01, bio_now + 1)
+    assert bio_mechanics.hazards and len(bio_mechanics.bullets) >= 18, "高强度瘟疫领主没有释放强化弹幕和污染区"
+    bio_mechanics.create_pollution(survivor["x"], survivor["y"], bio_now + 1, 3)
+    survivor["upgrade_choices"] = []
+    hp_before_pollution = survivor["hp"]
+    bio_mechanics.update_hazards(1, bio_now + 1.1)
+    assert survivor["hp"] < hp_before_pollution, "污染区没有持续伤害存活玩家"
+    bio_mechanics.task.cancel()
+
+    attack_room = Room("INFECTED_ATTACK", "bio")
+    infected_attacker = {**bio_player, "id": "infected-attacker", "x": 100, "y": 100,
+                         "hp": 110, "max_hp": 110, "infected": True, "choosing_zombie": False,
+                         "zombie_form": "normal", "effects": {}, "last_shot": 0,
+                         "input": {**bio_player["input"], "shoot": True, "ability": False, "angle": 0}}
+    melee_target = {**bio_player, "id": "melee-target", "x": 180, "y": 100, "hp": 100,
+                    "effects": {}, "infected": False, "input": {**bio_player["input"], "shoot": False}}
+    distant_target = {**melee_target, "id": "distant-target", "x": 700,
+                      "input": {**melee_target["input"]}}
+    attack_room.players = {player["id"]: player for player in (infected_attacker, melee_target, distant_target)}
+    attack_room.wave_active, attack_room.next_wave = False, bio_now + 100
+    attack_room.update(.01, bio_now + 2)
+    assert melee_target["hp"] == 82 and not any(bullet["owner"] == infected_attacker["id"] for bullet in attack_room.bullets), "普通感染体仍在发射子弹或近战爪击无效"
+    infected_attacker.update(zombie_form="shooter", hp=78, max_hp=78, last_shot=0)
+    attack_room.update(.01, bio_now + 3)
+    assert any(bullet["owner"] == infected_attacker["id"] and bullet["kind"] == "infected" for bullet in attack_room.bullets), "射手感染体没有保留专属远程攻击"
+    attack_room.task.cancel()
+
+    last_room = Room("LAST_SURVIVOR", "bio")
+    last_player = {**bio_player, "id": "last", "hp": 40, "max_hp": 100, "effects": {},
+                   "last_survivor": False, "input": {**bio_player["input"]}}
+    last_room.players = {"last": last_player}
+    last_room.update_last_survivor(bio_now)
+    assert not last_player["last_survivor"] and last_player["hp"] == 40, "单人生化模式错误触发了孤勇者"
+    infected_teammate = {**last_player, "id": "infected-teammate", "hp": 100, "infected": True,
+                         "zombie_form": "normal", "effects": {}, "input": {**last_player["input"]}}
+    last_room.players["infected-teammate"] = infected_teammate
+    last_room.update_last_survivor(bio_now)
+    assert last_player["last_survivor"] and last_player["max_hp"] == 200 and last_player["hp"] == 80 and last_player["effects"]["invincible"] == bio_now + 2, "孤勇者没有获得双倍最大生命和当前生命"
+    last_room.update_last_survivor(bio_now + 1)
+    assert last_player["max_hp"] == 200 and last_player["hp"] == 80, "孤勇者生命强化被重复叠加"
+    last_player["effects"].clear()
+    last_room.damage(last_player, 20, "zombie", bio_now + 3)
+    assert last_player["hp"] == 70, "孤勇者没有获得 50% 减伤"
+    infected_teammate["infected"] = False
+    last_room.update_last_survivor(bio_now + 4)
+    assert not last_player["last_survivor"] and last_player["max_hp"] == 100 and abs(last_player["hp"] - 35) < .01, "孤勇者状态结束后生命比例未正确还原"
+    last_room.task.cancel()
+
+    cannon_room = Room("BIO_CANNON", "bio")
+    cannon_shooter = {**bio_player, "id": "cannon", "x": 100, "y": 100, "hp": 100, "max_hp": 100,
+                      "effects": {"cannon": bio_now + 20, "damage": bio_now + 20}, "upgrades": {"power": 2},
+                      "last_shot": 0, "last_survivor": False,
+                      "input": {**bio_player["input"], "shoot": True, "angle": 0}}
+    cannon_teammate = {**cannon_shooter, "id": "cannon-friend", "x": 600, "effects": {},
+                       "infected": True, "zombie_form": "normal", "last_survivor": False,
+                       "input": {**cannon_shooter["input"], "shoot": False}}
+    cannon_room.players = {"cannon": cannon_shooter, "cannon-friend": cannon_teammate}
+    cannon_room.wave_active, cannon_room.next_wave = False, bio_now + 100
+    cannon_room.update(.01, bio_now + 1)
+    cannon_bullet = next(bullet for bullet in cannon_room.bullets if bullet["owner"] == "cannon")
+    expected_cannon_damage = cannon_room.test_settings["cannon_damage"] * 1.6 * 1.18 * 5 * 1.6
+    assert math.isclose(cannon_bullet["damage"], expected_cannon_damage), "攻城大炮没有继承伤害道具、火力升级、生化和孤勇者的伤害加成"
+    cannon_room.task.cancel()
     base_url = f"http://127.0.0.1:{os.environ.get('TEST_PORT', '8080')}"
     async with aiohttp.ClientSession() as session:
         async with session.get(f"{base_url}/health") as response:
             health = await response.json()
-            assert health == {"game": "neon-brawl", "edition": "internet", "status": "ok", "protocol": 16, "build": 43}, "互联网版健康检查标识错误"
+            assert health == {"game": "neon-brawl", "edition": "internet", "status": "ok", "protocol": 16, "build": 69}, "互联网版健康检查标识错误"
         async with session.get(f"{base_url}/rooms") as response:
             assert await response.json() == {"rooms": []}, "空服务器的公开房间列表不正确"
         async with session.get(f"{base_url}/") as response:
@@ -221,26 +410,32 @@ async def main():
             assert 'data-role="weaponmaster"' in page and 'data-role="paladin"' in page and 'id="skillButton"' in page, "新职业界面未加载"
             assert 'id="joystick"' in page and 'id="aimJoystick"' in page, "手机双轮盘界面未加载"
             assert 'id="chatToggle"' in page and 'id="chatPanel"' in page and 'id="chatForm"' in page and 'id="soundToggle"' in page, "折叠聊天或音效界面未加载"
+            assert 'id="rescueToggle"' in page and "连续 10 秒" in page and "25% 生命" in page, "生化房主救援开关或规则说明未加载"
+            assert all(marker in page for marker in ('id="testToggle"', 'id="testPanel"', 'id="testInfectSelf"', 'data-test="player_hp"', 'data-test="laser_damage"', 'id="autoAimToggle"')), "房主测试设置、直接感染或手机自动瞄准界面未加载"
+            assert all(marker in page for marker in ('id="zombieSelect"', 'data-zombie="raider"', 'data-zombie="vomiter"', 'data-zombie-boss="plague_lord"')), "感染阵营的僵尸及 Boss 选择界面未加载"
             assert 'id="roomBrowserToggle"' in page and 'id="roomBrowser"' in page and 'id="roomList"' in page, "公开房间列表界面未加载"
             assert 'id="guideToggle"' in page and 'id="guidePanel"' in page and 'id="guideClose"' in page, "玩法说明界面未加载"
             assert all(text in page for text in ("困难人机", "经典模式", "攻城大炮", "武器大师", "手机横屏和竖屏均可玩")), "玩法说明缺少重要规则"
             assert 'option value="upgrade"' in page and 'id="upgrades"' in page and 'id="upgradeChoices"' in page, "升级模式入口或选择面板未加载"
-            assert "升级模式强化" in page and "无敌并加速 7 秒" in page, "升级模式或圣骑士新规则未写入玩法说明"
-            assert 'option value="bio"' in page and "生化模式" in page and "瘟疫领主" in page and "钢铁畸变体" in page, "生化模式入口或玩法说明未加载"
-            assert '/static/style.css?v=17' in page and '/static/game.js?v=43' in page, "客户端缓存版本未更新"
+            assert "升级模式强化" in page and "进入升级选择时会持续无敌" in page and "无敌并加速 7 秒" in page, "升级无敌或圣骑士新规则未写入玩法说明"
+            assert 'option value="bio"' in page and "生化模式" in page and "瘟疫领主" in page and "钢铁畸变体" in page and "永久阵亡" in page, "生化模式入口、阵亡规则或玩法说明未加载"
+            assert "260生命" in page and "同阵营队友会共享小地图探索视野" in page, "感染形态属性或小地图共享规则未写入界面"
+            assert '/static/style.css?v=21' in page and '/static/game.js?v=69' in page, "客户端缓存版本未更新"
             assert response.headers.get("Cache-Control") == "no-store, no-cache, must-revalidate, max-age=0", "入口页没有禁止旧客户端缓存"
-        async with session.get(f"{base_url}/static/style.css?v=17") as response:
+        async with session.get(f"{base_url}/static/style.css?v=21") as response:
             mobile_style = await response.text()
             assert '@media (orientation: portrait)' in mobile_style and 'html.mobile-controls #rotateNotice { display: none; }' in mobile_style, "手机竖屏可玩布局未加载"
             assert 'width: min(116px, 29vw)' in mobile_style and 'height: min(52vh, 390px)' in mobile_style, "竖屏轮盘或聊天布局未适配"
-        async with session.get(f"{base_url}/static/game.js?v=43") as response:
+            assert "max-width: min(560px, calc(48vw - 24px))" in mobile_style and "text-overflow: ellipsis" in mobile_style, "Buff 面板没有限制宽度或溢出"
+        async with session.get(f"{base_url}/static/game.js?v=69") as response:
             mobile_script = await response.text()
             assert response.headers.get("Cache-Control") == "no-store, no-cache, must-revalidate, max-age=0", "客户端脚本没有禁止缓存"
             assert "visualViewport" in mobile_script and "viewWidth" in mobile_script and "orientationchange" in mobile_script, "动态横屏适配脚本未加载"
-            assert "viewScale" in mobile_script and "viewHeight > viewWidth ? .62 : .72" in mobile_script and "motionTracks" in mobile_script and "function visible" in mobile_script, "移动端横竖屏视野或性能优化未加载"
+            assert "viewScale" in mobile_script and "viewHeight > viewWidth ? .57 : .66" in mobile_script and "motionTracks" in mobile_script and "function visible" in mobile_script and "movementSteps" in mobile_script and "cameraBlend" in mobile_script, "移动端横竖屏视野、低帧率移动或摄像机优化未加载"
+            assert all(marker in mobile_script for marker in ("bioTerrainCache", "rebuildBioTerrainCache", "drawTerrain()", "terrainContext.createLinearGradient")), "生化地图原画质缓存绘制未加载"
             assert "speedTrailAnchors" in mobile_script and "recordSpeedTrails(displayPlayers, now)" in mobile_script and "drawSpeedTrails(now)" in mobile_script and "/ 220" in mobile_script, "加速残影未跟随最终渲染坐标或仍然过长"
             assert "touchMove" in mobile_script and "touchAim" in mobile_script and 'aimJoystick.addEventListener("pointerdown"' in mobile_script, "双轮盘输入脚本未加载"
-            assert "KEY_CODES" in mobile_script and "sendInput(performance.now(), true)" in mobile_script, "公网键盘兼容输入脚本未加载"
+            assert "KEY_CODES" in mobile_script and "sendInput(performance.now(), true)" in mobile_script and "INPUT_INTERVAL_MS = 33" in mobile_script and "setInterval(() => sendInput" in mobile_script, "公网键盘兼容或独立输入循环未加载"
             assert "appendChatMessage" in mobile_script and "message.textContent" in mobile_script and "stopGameInput" in mobile_script, "安全聊天或输入隔离脚本未加载"
             assert all(marker in mobile_script for marker in ("AudioContext", "playStateSounds", "playEffect", "neon-sound")), "游戏音效系统未加载"
             assert "unreadChats > 9" in mobile_script and 'chatUnread.textContent = "0"' in mobile_script, "聊天未读红点计数未加载"
@@ -253,12 +448,19 @@ async def main():
             assert "extrapolatedBulletPosition" in mobile_script, "子弹预测缺少墙体碰撞限制"
             assert all(marker in mobile_script for marker in ("sampledBulletPoint", "aimOrigin", "move_x", "input_seq", "baseLead", "perpendicular", "ws.bufferedAmount")), "移动、停止确认、瞄准或匀速校正优化未加载"
             assert "stop_x" not in mobile_script and "predictionHoldUntil" not in mobile_script, "旧的停止补位逻辑仍在客户端"
-            assert "event.repeat" in mobile_script and "visibilitychange" in mobile_script, "卡键和页面后台输入保护未加载"
+            assert "event.repeat" in mobile_script and "visibilitychange" in mobile_script and "if (document.hidden) stopGameInput()" in mobile_script and "canvas.focus({ preventScroll: true })" in mobile_script, "卡键、瞬时失焦或页面后台输入保护未加载"
             assert all(marker in mobile_script for marker in ('refreshRoomBrowser', 'fetch("/rooms"', 'room.players', 'room.mode')), "公开房间列表读取或选择逻辑未加载"
-            assert all(marker in mobile_script for marker in ("BUILD_VERSION = 43", "neon-protocol-refresh", "location.replace", "主机仍在运行旧版服务器", "该房间已使用其他玩法模式")), "版本自动刷新、构建检查或模式错误提示未加载"
+            assert all(marker in mobile_script for marker in ("BUILD_VERSION = 69", "neon-protocol-refresh", "location.replace", "主机仍在运行旧版服务器", "该房间已使用其他玩法模式")), "版本自动刷新、构建检查或模式错误提示未加载"
+            assert "靠近尸体5秒可完成感染" in mobile_script, "感染玩家的尸体感染提示未加载"
+            assert all(marker in mobile_script for marker in ("testInfectSelf", "test_infect_self", "infected_players", "survivor_players", "room.infected")), "直接感染、感染人数或房间感染统计没有加载"
+            assert "? .57 : .66" in mobile_script and "volume * 4" in mobile_script and "Math.min(.4" in mobile_script, "手机视野缩放或四倍音量没有加载"
+            assert all(marker in mobile_script for marker in ("INFECTED_MOVE_SPEEDS", "function playerMoveSpeed", "INFECTED_SKILLS", "last_survivor")), "感染形态平滑移动、技能按钮或最后幸存者显示没有加载"
             assert all(marker in mobile_script for marker in ("openGuide", "closeGuide", "guidePanel.hidden")), "玩法说明打开或关闭逻辑未加载"
-            assert all(marker in mobile_script for marker in ("UPGRADE_INFO", "updateUpgradePanel", "select_upgrade", "next_level_score", "[Lv.${p.level")), "升级选择、经验显示或等级名称未加载"
-            assert all(marker in mobile_script for marker in ("exploredBioCells", "drawBioFog", "drawBioMinimap", "drawZombies", "drawBioWaveHud")), "生化模式迷雾、小地图、僵尸或波次界面未加载"
+            assert all(marker in mobile_script for marker in ("UPGRADE_INFO", "updateUpgradePanel", "select_upgrade", "next_level_score", "[Lv.${p.level", "升级选择中 · 当前无敌", "p.upgrading")), "升级选择、无敌提示、经验显示或等级名称未加载"
+            assert all(marker in mobile_script for marker in ("exploredBioCells", "revealBioCellsAt", "Boolean(teammate.infected) === Boolean(me.infected)", "队伍共享探索", "drawBioFog", "drawBioMinimap", "drawZombies", "drawBioWaveHud")), "生化模式队伍共享探索、迷雾、小地图、僵尸或波次界面未加载"
+            assert "labels.slice(0, 4)" in mobile_script and "hiddenCount" in mobile_script, "Buff 数量没有折叠限制"
+            assert all(marker in mobile_script for marker in ("rescueToggle", "toggle_rescue", "rescue_progress", "救援中")), "生化救援按钮、进度或尸体提示未加载"
+            assert all(marker in mobile_script for marker in ("autoAimEnabled", "nearestAutoAimTarget", "touchAutoShoot", "select_zombie", "test_settings", "drawHazards")), "自动瞄准、感染形态、测试参数或污染区脚本未加载"
 
         first = await session.ws_connect(f"{base_url}/ws")
         second = await session.ws_connect(f"{base_url}/ws")
@@ -267,7 +469,7 @@ async def main():
         first_welcome = json.loads((await first.receive()).data)
         second_welcome = json.loads((await second.receive()).data)
         assert first_welcome["room"] == run_id and second_welcome["room"] == run_id
-        assert first_welcome["protocol"] == 16 and first_welcome["build"] == 43 and first_welcome["edition"] == "internet" and len(first_welcome["obstacles"]) > 8, "初始地形、构建版本或压缩协议未发送"
+        assert first_welcome["protocol"] == 16 and first_welcome["build"] == 69 and first_welcome["edition"] == "internet" and len(first_welcome["obstacles"]) > 8, "初始地形、构建版本或压缩协议未发送"
         for _ in range(20):
             state = json.loads((await first.receive()).data)
             player_names = {player["name"] for player in state.get("players", [])}
@@ -280,7 +482,7 @@ async def main():
         async with session.get(f"{base_url}/rooms") as response:
             listed_rooms = (await response.json())["rooms"]
         listed_room = next((room for room in listed_rooms if room["code"] == run_id), None)
-        assert listed_room == {"code": run_id, "mode": "classic", "players": 2, "bots": 0, "capacity": 12}, "公开房间的模式或人数不正确"
+        assert listed_room == {"code": run_id, "mode": "classic", "players": 2, "infected": 0, "bots": 0, "capacity": 12}, "公开房间的模式或人数不正确"
         assert isinstance(state.get("server_time"), (int, float)), "状态帧缺少服务器时间戳"
         assert all(pickup["kind"] in {"damage", "rapid", "multishot", "laser", "shield", "speed", "beam", "health", "ricochet", "cannon", "minion"}
                    for pickup in state["pickups"]), "出现未知道具"
@@ -371,9 +573,19 @@ async def main():
 
         pure = await session.ws_connect(f"{base_url}/ws")
         await pure.send_json({"name": "纯净测试", "room": f"P{run_id}", "mode": "pure"})
-        assert json.loads((await pure.receive()).data)["mode"] == "pure"
+        pure_welcome = json.loads((await pure.receive()).data)
+        assert pure_welcome["mode"] == "pure"
         pure_state = json.loads((await pure.receive()).data)
         assert pure_state["pickups"] == [], "纯净模式仍然生成了道具"
+        await pure.send_json({"type": "input", "seq": 1, "shoot": True, "angle": 0})
+        await pure.send_json({"type": "input", "seq": 2, "shoot": False, "angle": 0})
+        tapped_bullet = None
+        for _ in range(10):
+            pure_state = json.loads((await pure.receive()).data)
+            tapped_bullet = next((bullet for bullet in pure_state.get("bullets", []) if bullet["owner"] == pure_welcome["id"]), None)
+            if tapped_bullet:
+                break
+        assert tapped_bullet, "快速点击按下和松开处于同一服务器帧时没有发射子弹"
         await pure.close()
 
         profession = await session.ws_connect(f"{base_url}/ws")
@@ -412,12 +624,48 @@ async def main():
         bio_state = json.loads((await bio.receive()).data)
         assert bio_state["bio"]["wave"] == 0 and bio_state["bio"]["next_wave"] > 0 and not any(player.get("bot") for player in bio_state["players"]), "生化模式初始倒计时或合作房间人机规则错误"
         assert "zombies" in bio_state and bio_state["players"][0]["next_level_score"] == 4, "生化僵尸同步或经验曲线错误"
+        assert bio_state["bio"]["host_id"] == bio_welcome["id"] and not bio_state["bio"]["rescue_enabled"], "首位进入生化房间的玩家没有成为房主或救援默认状态错误"
+        assert bio_state["bio"]["infected_players"] == 0 and bio_state["bio"]["survivor_players"] == 1, "生化房间没有同步幸存者和感染玩家数量"
+        await bio.send_json({"type": "toggle_rescue", "enabled": True})
+        for _ in range(10):
+            bio_state = json.loads((await bio.receive()).data)
+            if bio_state.get("bio", {}).get("rescue_enabled"):
+                break
+        assert bio_state["bio"]["rescue_enabled"], "房主无法开启生化救援模式"
+        await bio.send_json({"type": "test_settings", "values": {"player_hp": 160, "bullet_damage": 37, "weapon_duration": 18}})
+        for _ in range(10):
+            bio_state = json.loads((await bio.receive()).data)
+            if bio_state.get("test", {}).get("bullet_damage") == 37:
+                break
+        assert bio_state["test"]["player_hp"] == 160 and bio_state["test"]["weapon_duration"] == 18, "房主测试参数没有通过网络生效"
+        bio_guest = await session.ws_connect(f"{base_url}/ws")
+        await bio_guest.send_json({"name": "救援队友", "room": f"Z{run_id}", "mode": "bio"})
+        guest_welcome = json.loads((await bio_guest.receive()).data)
+        assert guest_welcome["id"] != bio_state["bio"]["host_id"], "后加入玩家错误成为生化房主"
+        await bio_guest.send_json({"type": "toggle_rescue", "enabled": False})
+        await bio_guest.send_json({"type": "test_settings", "values": {"bullet_damage": 199}})
+        for _ in range(3):
+            guest_state = json.loads((await bio_guest.receive()).data)
+            if guest_state.get("type") == "state":
+                assert guest_state["bio"]["rescue_enabled"], "非房主玩家关闭了救援模式"
+                assert guest_state["test"]["bullet_damage"] == 37, "非房主玩家修改了测试参数"
+        await bio.send_json({"type": "test_infect_self"})
+        for _ in range(20):
+            infected_state = json.loads((await bio.receive()).data)
+            host_player = next((member for member in infected_state.get("players", []) if member["id"] == bio_welcome["id"]), None)
+            if host_player and host_player.get("infected"):
+                break
+        assert host_player["choosing_zombie"] and infected_state["bio"]["infected_players"] == 1 and infected_state["bio"]["survivor_players"] == 1, "房主测试按钮无法直接感染自己或感染人数未同步"
+        async with session.get(f"{base_url}/rooms") as response:
+            bio_listing = next(room for room in (await response.json())["rooms"] if room["code"] == f"Z{run_id}")
+        assert bio_listing["infected"] == 1, "公开房间列表没有显示感染玩家数量"
+        await bio_guest.close()
         await bio.close()
         launcher_script = (os.path.join(os.path.dirname(__file__), "start_internet.ps1"))
         with open(launcher_script, encoding="utf-8-sig") as launcher_file:
             launcher_text = launcher_file.read()
         assert "[房间人数]" in launcher_text and "latestRoomStatus" in launcher_text, "互联网主机窗口没有显示房间人数"
-        print("OK: 生化波次、三类Boss、探索迷雾、升级模式及多人同步均正常")
+        print("OK: 强化Boss、新僵尸、感染阵营、污染区、无限升级、测试设置、自动瞄准及多人同步均正常")
 
 
 asyncio.run(main())

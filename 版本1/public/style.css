@@ -49,15 +49,22 @@ h1 { font-size: 38px; margin: 5px 0; color: #72f1d0; text-shadow: 0 0 25px #38d9
 canvas { width: var(--view-width); height: var(--view-height); }
 canvas { display: block; cursor: crosshair; touch-action: none; }
 #hud, #help { position: fixed; z-index: 2; background: #0b1328cc; border: 1px solid #314878; backdrop-filter: blur(8px); }
-#hud { top: 16px; left: 16px; padding: 10px 15px; border-radius: 10px; }
+#hud { top: 16px; left: 16px; max-width: min(560px, calc(48vw - 24px)); padding: 10px 15px; border-radius: 10px; overflow: hidden; }
 #hud, #help { pointer-events: none; }
 #hud b { color: #72f1d0; margin-right: 18px; }
 #status { color: #b7c5df; }
-#powerups { display: block; margin-top: 7px; color: #ffd166; font-size: 12px; font-style: normal; }
+#powerups { display: block; margin-top: 7px; overflow: hidden; color: #ffd166; font-size: 12px; font-style: normal; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 #help { bottom: 15px; left: 50%; transform: translateX(-50%); padding: 8px 14px; border-radius: 8px; color: #96a8c7; font-size: 13px; white-space: nowrap; }
 .touch-help, #joystick, #aimJoystick { display: none; }
 #skillButton { display: none; position: fixed; right: max(42px, env(safe-area-inset-right)); bottom: min(176px, 40vh); z-index: 4; width: 76px; height: 44px; border: 2px solid #ffe48a; border-radius: 22px; background: #8a6819dd; color: white; font-weight: 800; box-shadow: 0 0 20px #ffd16666; touch-action: none; }
 #skillButton[disabled] { opacity: .48; filter: grayscale(.5); }
+#rescueToggle { position: fixed; top: 16px; right: 158px; z-index: 6; min-width: 122px; height: 38px; padding: 0 12px; border: 1px solid #5a789e; border-radius: 19px; background: #101a32e8; color: #dce9ff; font-weight: 800; cursor: pointer; box-shadow: 0 8px 24px #0007; }
+#rescueToggle.enabled { border-color: #72f1d0; background: #16493fe8; color: #baffed; box-shadow: 0 0 18px #55d6be55; }
+#rescueToggle[hidden] { display: none; }
+#testToggle { position: fixed; top: 16px; right: 288px; z-index: 6; height: 38px; padding: 0 13px; border: 1px solid #8067d9; border-radius: 19px; background: #17152fe8; color: #e3d8ff; font-weight: 800; cursor: pointer; box-shadow: 0 8px 24px #0007; }
+#testToggle[hidden], #autoAimToggle[hidden] { display: none; }
+#autoAimToggle { display: none; position: fixed; right: max(20px, env(safe-area-inset-right)); bottom: max(228px, calc(env(safe-area-inset-bottom) + 208px)); z-index: 6; padding: 9px 12px; border: 1px solid #ff7998; border-radius: 18px; background: #271126e8; color: #ffe4eb; font-weight: 800; }
+#autoAimToggle.enabled { border-color: #72f1d0; background: #16493fe8; color: #baffed; }
 #chatToggle { position: fixed; top: 16px; right: 16px; z-index: 6; min-width: 86px; padding: 9px 13px; border: 1px solid #42618f; border-radius: 18px; background: #101a32e8; color: #eef6ff; font-weight: 700; cursor: pointer; box-shadow: 0 8px 24px #0007; }
 #chatToggle[hidden] { display: none; }
 #chatUnread { position: absolute; top: -7px; right: -6px; display: grid; place-items: center; min-width: 19px; height: 19px; padding: 0 4px; border: 2px solid #fff; border-radius: 999px; background: #ff243f; color: #fff; font: 800 10px/1 sans-serif; box-shadow: 0 0 0 4px #ff243f33, 0 0 15px #ff243f; animation: unreadPulse 1.25s ease-in-out infinite; }
@@ -86,8 +93,25 @@ canvas { display: block; cursor: crosshair; touch-action: none; }
 #rotateNotice div { display: grid; gap: 10px; color: #72f1d0; font-size: 50px; }
 #rotateNotice b { color: #eef6ff; font-size: 22px; }
 #rotateNotice small { color: #91a3c3; font-size: 13px; }
-#roles { position: fixed; left: 0; top: 0; width: var(--view-width); height: var(--view-height); z-index: 5; display: grid; place-items: center; background: #050a16cc; backdrop-filter: blur(8px); }
-#roles[hidden] { display: none; }
+#roles, #zombieSelect { position: fixed; left: 0; top: 0; width: var(--view-width); height: var(--view-height); z-index: 5; display: grid; place-items: center; background: #050a16cc; backdrop-filter: blur(8px); }
+#roles[hidden], #zombieSelect[hidden] { display: none; }
+#zombieSelect .role-card { border-color: #5d9b55; }
+#zombieSelect .role-card h2 { color: #9cff79; }
+#zombieSelect button[data-zombie-boss] { border-color: #c64d72; color: #ffdbe5; }
+#zombieSelect button[disabled] { display: none; }
+#testPanel { position: fixed; inset: 0; z-index: 12; display: grid; place-items: center; padding: 14px; background: #050a16d9; backdrop-filter: blur(9px); }
+#testPanel[hidden] { display: none; }
+.test-card { width: min(94vw, 620px); max-height: 90vh; overflow-y: auto; padding: 22px; border: 1px solid #8067d9; border-radius: 20px; background: #101a32; box-shadow: 0 24px 90px #000c; }
+.test-card header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
+.test-card h2 { margin: 0; color: #d9c7ff; }
+#testClose { width: 34px; height: 34px; border: 0; border-radius: 50%; background: #283253; color: #fff; font-size: 22px; }
+.test-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.test-grid label { color: #aebbd3; font-size: 12px; }
+.test-grid input { width: 100%; margin-top: 5px; padding: 10px; border: 1px solid #43547c; border-radius: 9px; background: #081126; color: #fff; }
+.test-actions { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+#testApply, #testInfectSelf { min-width: 180px; padding: 11px; border: 0; border-radius: 10px; background: #8067d9; color: #fff; font-weight: 800; }
+#testInfectSelf { background: #457b34; box-shadow: 0 0 18px #75dc5740; }
+#testInfectSelf[hidden] { display: none; }
 #upgrades { position: fixed; inset: 0; width: var(--view-width); height: var(--view-height); z-index: 8; display: grid; place-items: center; padding: 14px; background: #050a16d9; backdrop-filter: blur(9px); }
 #upgrades[hidden] { display: none; }
 .upgrade-card { width: min(92vw, 720px); padding: 28px; border: 1px solid #8067d9; border-radius: 22px; background: #101a32; text-align: center; box-shadow: 0 24px 90px #000b, 0 0 45px #7c5cff26; }
@@ -117,10 +141,14 @@ html.mobile-controls #joystick { left: max(14px, env(safe-area-inset-left)); bot
 html.mobile-controls #aimJoystick { right: max(14px, env(safe-area-inset-right)); bottom: max(18px, env(safe-area-inset-bottom)); width: min(126px, 29vh); height: min(126px, 29vh); }
 html.mobile-controls #joystickKnob, html.mobile-controls #aimJoystickKnob { width: 43%; height: 43%; }
 html.mobile-controls #help { bottom: max(6px, env(safe-area-inset-bottom)); font-size: 10px; width: auto; max-width: calc(var(--view-width) - 300px); left: 50%; transform: translateX(-50%); text-align: center; white-space: normal; pointer-events: none; }
-html.mobile-controls #hud { top: max(6px, env(safe-area-inset-top)); left: max(6px, env(safe-area-inset-left)); max-width: calc(var(--view-width) - 12px); padding: 7px 10px; font-size: 11px; }
-html.mobile-controls #powerups { margin-top: 4px; font-size: 10px; }
+html.mobile-controls #hud { top: max(6px, env(safe-area-inset-top)); left: max(6px, env(safe-area-inset-left)); max-width: min(47vw, 520px); padding: 7px 10px; font-size: 11px; }
+html.mobile-controls #powerups { margin-top: 4px; max-height: 28px; font-size: 10px; white-space: normal; }
 html.mobile-controls #chatToggle { top: max(6px, env(safe-area-inset-top)); right: max(6px, env(safe-area-inset-right)); min-width: 74px; padding: 7px 10px; font-size: 12px; }
 html.mobile-controls #soundToggle { top: max(6px, env(safe-area-inset-top)); right: max(88px, calc(env(safe-area-inset-right) + 82px)); width: 34px; height: 34px; font-size: 15px; }
+html.mobile-controls #rescueToggle { top: max(6px, env(safe-area-inset-top)); right: max(130px, calc(env(safe-area-inset-right) + 124px)); min-width: 105px; height: 34px; padding: 0 8px; font-size: 11px; }
+html.mobile-controls #testToggle { top: max(44px, calc(env(safe-area-inset-top) + 40px)); right: max(6px, env(safe-area-inset-right)); height: 32px; font-size: 11px; }
+html.mobile-controls #autoAimToggle:not([hidden]) { display: block; }
+html.mobile-controls.auto-aim #aimJoystick { display: none; }
 html.mobile-controls #chatPanel { top: max(5px, env(safe-area-inset-top)); right: max(5px, env(safe-area-inset-right)); width: min(370px, calc(var(--view-width) - 10px)); height: min(310px, calc(var(--view-height) - 10px)); }
 @media (orientation: portrait) {
   html.mobile-controls #rotateNotice { display: none; }

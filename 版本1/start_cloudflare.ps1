@@ -15,7 +15,7 @@ $serverProcess = $null
 $tunnelProcess = $null
 $ownsServer = $false
 $expectedProtocol = 16
-$expectedBuild = 43
+$expectedBuild = 69
 $instanceLock = [Threading.Mutex]::new($false, "Local\NeonBrawlInternet$Port")
 $lockTaken = $false
 

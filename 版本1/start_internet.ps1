@@ -18,7 +18,7 @@ $frpcProcess = $null
 $ownsServer = $false
 $ownsFrpc = $false
 $expectedProtocol = 16
-$expectedBuild = 43
+$expectedBuild = 69
 $instanceLock = [Threading.Mutex]::new($false, "Local\NeonBrawlFrp$Port")
 $lockTaken = $false
 

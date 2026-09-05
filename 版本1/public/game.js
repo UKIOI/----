@@ -10,6 +10,15 @@ const joystickKnob = document.querySelector("#joystickKnob");
 const aimJoystick = document.querySelector("#aimJoystick");
 const aimJoystickKnob = document.querySelector("#aimJoystickKnob");
 const skillButton = document.querySelector("#skillButton");
+const rescueToggle = document.querySelector("#rescueToggle");
+const testToggle = document.querySelector("#testToggle");
+const testPanel = document.querySelector("#testPanel");
+const testClose = document.querySelector("#testClose");
+const testApply = document.querySelector("#testApply");
+const testInfectSelf = document.querySelector("#testInfectSelf");
+const zombieSelect = document.querySelector("#zombieSelect");
+const zombieLives = document.querySelector("#zombieLives");
+const autoAimToggle = document.querySelector("#autoAimToggle");
 const chatToggle = document.querySelector("#chatToggle");
 const chatUnread = document.querySelector("#chatUnread");
 const chatPanel = document.querySelector("#chatPanel");
@@ -31,6 +40,9 @@ const upgradeProgress = document.querySelector("#upgradeProgress");
 const upgradeChoices = document.querySelector("#upgradeChoices");
 const MODE_NAMES = { classic: "经典模式", items: "多道具模式", pure: "纯净模式", profession: "职业模式", upgrade: "升级模式", bio: "生化模式" };
 const ROLE_NAMES = { tank: "坦克", mage: "法师", sniper: "狙击手", necromancer: "死灵法师", weaponmaster: "武器大师", paladin: "圣骑士" };
+const ZOMBIE_FORM_NAMES = { normal: "普通", raider: "突袭者", shooter: "射手", giant: "巨型", vomiter: "呕吐者", plague_lord: "瘟疫领主", brood_queen: "巢群女王", iron_abomination: "钢铁畸变体" };
+const INFECTED_SKILLS = { normal: "狂暴", raider: "突袭", shooter: "毒弹齐射", giant: "震地", vomiter: "污染喷吐", plague_lord: "瘟疫领域", brood_queen: "召唤尸潮", iron_abomination: "毁灭冲锋" };
+const INFECTED_MOVE_SPEEDS = { normal: 285, raider: 390, shooter: 270, giant: 185, vomiter: 235, plague_lord: 158.4, brood_queen: 187, iron_abomination: 136.4 };
 const UPGRADE_INFO = {
   vitality: { icon: "♥", name: "生命强化", text: "最大生命 +15，并恢复 15 点", max: 3 },
   power: { icon: "◆", name: "火力强化", text: "子弹伤害 +10%", max: 3 },
@@ -47,21 +59,25 @@ const POWERUPS = {
   health: { icon: "+", name: "生命补给", color: "#ff4268" }, ricochet: { icon: "↗", name: "反弹弹药", color: "#ff9f43" },
   cannon: { icon: "●", name: "攻城大炮", color: "#ff7b39" }, minion: { icon: "◉", name: "战斗随从", color: "#72f1d0" },
   invincible: { icon: "✧", name: "神圣无敌", color: "#ffe17a" },
+  infected_frenzy: { icon: "☣", name: "感染狂暴", color: "#9cff57" },
 };
 const PROTOCOL_VERSION = 16;
-const BUILD_VERSION = 43;
+const BUILD_VERSION = 69;
+const INPUT_INTERVAL_MS = 33;
 let ws, myId = null, requestedMode = "classic", world = { width: 1600, height: 900 };
-let state = { players: [], bullets: [], lasers: [], explosions: [], pickups: [], obstacles: [], zombies: [], bio: null };
+let state = { players: [], bullets: [], lasers: [], explosions: [], pickups: [], obstacles: [], zombies: [], hazards: [], bio: null };
 let keys = {}, mouse = { x: 0, y: 0, down: false }, touchMove = { x: 0, y: 0 }, touchAim = { x: 1, y: 0, active: false };
 let movePointer = null, aimPointer = null;
+let autoAimEnabled = false, autoFirePointer = null, touchAutoShoot = false;
 const mobileUserAgent = navigator.userAgentData?.mobile === true || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|HarmonyOS|Mobile/i.test(navigator.userAgent);
 const ipadLike = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
 const mobileMode = mobileUserAgent || ipadLike;
 document.documentElement.classList.toggle("mobile-controls", mobileMode);
-let viewScale = mobileMode ? (innerHeight > innerWidth ? .62 : .72) : 1;
+// 手机端缩小世界画面约 8%，同时展示更多地图区域。
+let viewScale = mobileMode ? (innerHeight > innerWidth ? .57 : .66) : 1;
 let camera = { x: 0, y: 0 }, lastSend = 0, receivedState = false, stateReceivedAt = performance.now();
 let unreadChats = 0;
-let predictedSelf = null, lastFrame = performance.now(), lastPing = 0, latency = null;
+let predictedSelf = null, lastFrame = performance.now(), frameDeltaSeconds = 1 / 60, lastPing = 0, latency = null;
 let predictionBlocked = false, inputSequence = 0, lastStopSequence = -1, lastSentMoving = false;
 let viewWidth = innerWidth, viewHeight = innerHeight, sceneWidth = innerWidth / viewScale, sceneHeight = innerHeight / viewScale;
 const speedTrails = new Map();
@@ -77,11 +93,13 @@ const soundCooldowns = new Map(), heardExplosions = new Map();
 let roomRefreshTimer = 0;
 let lastUpgradeSignature = "";
 const exploredBioCells = new Set();
+const bioTerrainCache = document.createElement("canvas");
+let bioTerrainSignature = "";
 function resize() {
   const viewport = window.visualViewport;
   const ratio = Math.min(devicePixelRatio || 1, mobileMode ? 1.5 : 2);
   viewWidth = Math.round(viewport?.width || innerWidth); viewHeight = Math.round(viewport?.height || innerHeight);
-  viewScale = mobileMode ? (viewHeight > viewWidth ? .62 : .72) : 1;
+  viewScale = mobileMode ? (viewHeight > viewWidth ? .57 : .66) : 1;
   sceneWidth = viewWidth / viewScale; sceneHeight = viewHeight / viewScale;
   canvas.style.width = `${viewWidth}px`; canvas.style.height = `${viewHeight}px`;
   canvas.width = Math.round(viewWidth * ratio); canvas.height = Math.round(viewHeight * ratio);
@@ -107,7 +125,7 @@ async function refreshRoomBrowser() {
       const row = document.createElement("article"), code = document.createElement("b"), mode = document.createElement("span"), count = document.createElement("span"), choose = document.createElement("button");
       row.className = "room-row"; code.className = "room-code"; mode.className = "room-mode"; count.className = "room-count";
       code.textContent = room.code; mode.textContent = MODE_NAMES[room.mode] || room.mode;
-      count.textContent = `${room.players}/${room.capacity} 真人${room.bots ? ` · ${room.bots} 人机` : ""}`;
+      count.textContent = `${room.players}/${room.capacity} 真人${room.infected ? ` · ${room.infected} 感染` : ""}${room.bots ? ` · ${room.bots} 人机` : ""}`;
       choose.type = "button"; choose.disabled = room.players >= room.capacity; choose.textContent = choose.disabled ? "已满" : "选择";
       choose.addEventListener("click", () => {
         document.querySelector("#room").value = room.code; document.querySelector("#mode").value = room.mode;
@@ -164,20 +182,31 @@ function connect() {
       myId = data.id; world = data; state.obstacles = data.obstacles || []; predictedSelf = null; motionTracks.clear(); speedTrails.clear(); speedTrailAnchors.clear(); heardExplosions.clear(); exploredBioCells.clear(); soundSnapshotReady = false; serverClockOffset = null; inputSequence = 0; lastStopSequence = -1; lastSentMoving = false; lastPing = 0; menu.hidden = true; game.hidden = false; canvas.tabIndex = 0; canvas.focus();
       document.querySelector("#roomLabel").textContent = `房间 ${data.room} · ${MODE_NAMES[data.mode]}`;
       statusLabel.textContent = data.mode === "profession" ? "请选择职业" : "正在载入战场…";
-      rolePanel.hidden = data.mode !== "profession"; upgradePanel.hidden = true; lastUpgradeSignature = "";
+      rolePanel.hidden = data.mode !== "profession"; upgradePanel.hidden = true; zombieSelect.hidden = true; testPanel.hidden = true; lastUpgradeSignature = "";
+      autoAimToggle.hidden = !mobileMode;
     } else if (data.type === "state") {
       const receivedAt = performance.now(), destroyed = new Map(data.destroyed || []);
       data.obstacles = (state.obstacles || []).map(obstacle => ({ ...obstacle, active: !destroyed.has(obstacle.id), restore: destroyed.get(obstacle.id) || 0 }));
       reconcilePrediction(data.players.find(player => player.id === myId));
       recordMotionSnapshots(data, synchronizedSnapshotTime(data.server_time, receivedAt)); playStateSounds(state, data, receivedAt); state = data; stateReceivedAt = receivedAt; receivedState = true; const me = data.players.find(player => player.id === myId);
       if (requestedMode === "profession") rolePanel.hidden = me?.ready === true;
+      const isBioHost = requestedMode === "bio" && data.bio?.host_id === myId;
+      rescueToggle.hidden = !isBioHost; rescueToggle.disabled = false;
+      rescueToggle.classList.toggle("enabled", Boolean(data.bio?.rescue_enabled));
+      rescueToggle.textContent = data.bio?.rescue_enabled ? "救援：已开启" : "救援：关闭";
+      testToggle.hidden = data.host_id !== myId;
+      testInfectSelf.hidden = requestedMode !== "bio" || data.host_id !== myId || Boolean(me?.infected);
+      updateZombiePanel(me, data.bio);
       updateUpgradePanel(me);
-      const isPaladin = me?.ready && me.role === "paladin";
-      skillButton.hidden = !isPaladin;
-      if (isPaladin) { skillButton.disabled = me.ability_cooldown > 0; skillButton.textContent = me.ability_cooldown > 0 ? `圣盾 ${Math.ceil(me.ability_cooldown)}s` : "圣盾"; }
+      const isPaladin = me?.ready && me.role === "paladin" && me.hp > 0;
+      const isInfected = requestedMode === "bio" && me?.ready && me.infected && !me.choosing_zombie && me.hp > 0;
+      const skillName = isInfected ? INFECTED_SKILLS[me.zombie_form] || "感染技能" : "圣盾";
+      skillButton.hidden = !(isPaladin || isInfected);
+      if (isPaladin || isInfected) { skillButton.disabled = me.ability_cooldown > 0; skillButton.textContent = me.ability_cooldown > 0 ? `${skillName} ${Math.ceil(me.ability_cooldown)}s` : skillName; }
       const pingText = latency === null ? "" : ` · ${latency}ms`;
       const levelText = ["upgrade", "bio"].includes(requestedMode) && me ? ` · Lv.${me.level} 经验 ${me.xp}/${me.next_level_score ?? "满级"}` : "";
-      statusLabel.textContent = me && !me.ready ? "请选择职业" : `${me?.role ? ROLE_NAMES[me.role] + " · " : ""}已连接 · ${data.players.length} 人在线${levelText}${pingText}`; updatePowerLabel();
+      const deadStatus = me?.infected ? me.choosing_zombie ? `选择感染形态 · 本波还可复活 ${me.zombie_respawns} 次` : "感染体复活次数已耗尽" : me?.infection_progress ? `尸体感染中 ${me.infection_progress.toFixed(1)}/5秒` : data.bio?.rescue_enabled ? `你已阵亡 · 等待队友救援${me?.rescue_progress ? ` ${me.rescue_progress.toFixed(1)}/10秒` : ""}` : "你已阵亡 · 本局无法复活";
+      statusLabel.textContent = me && !me.ready ? "请选择职业" : requestedMode === "bio" && me?.hp <= 0 ? deadStatus : me?.upgrading ? "升级选择中 · 当前无敌" : `${me?.role ? ROLE_NAMES[me.role] + " · " : ""}已连接 · ${data.players.length} 人在线${levelText}${pingText}`; updatePowerLabel();
     } else if (data.type === "pong") {
       const sample = performance.now() - Number(data.sent);
       if (Number.isFinite(sample) && sample >= 0) latency = Math.round(latency === null ? sample : latency * .7 + sample * .3);
@@ -197,6 +226,42 @@ skillButton.addEventListener("pointerdown", event => {
   event.preventDefault();
   if (!skillButton.disabled) { playEffect("shield"); ws?.send(JSON.stringify({ type: "ability" })); }
 });
+rescueToggle.addEventListener("click", () => {
+  if (requestedMode !== "bio" || rescueToggle.hidden) return;
+  playEffect("ui"); rescueToggle.disabled = true;
+  ws?.send(JSON.stringify({ type: "toggle_rescue", enabled: !state.bio?.rescue_enabled }));
+});
+function updateZombiePanel(me, bio) {
+  const choosing = requestedMode === "bio" && me?.infected && me?.choosing_zombie;
+  const wasHidden = zombieSelect.hidden;
+  zombieSelect.hidden = !choosing;
+  if (!choosing) return;
+  zombieLives.textContent = `本波剩余复活机会：${me.zombie_respawns}`;
+  const bossAllowed = bio?.wave > 0 && bio.wave % 5 === 0 && me.boss_used_wave !== bio.wave;
+  document.querySelectorAll("[data-zombie-boss]").forEach(button => { button.disabled = !bossAllowed; });
+  if (wasHidden) stopGameInput();
+}
+document.querySelectorAll("[data-zombie], [data-zombie-boss]").forEach(button => button.addEventListener("click", () => {
+  playEffect("ui"); ws?.send(JSON.stringify({ type: "select_zombie", form: button.dataset.zombie || button.dataset.zombieBoss }));
+}));
+function syncTestInputs() {
+  for (const input of document.querySelectorAll("[data-test]")) input.value = state.test?.[input.dataset.test] ?? "";
+}
+testToggle.addEventListener("click", () => { playEffect("ui"); syncTestInputs(); testPanel.hidden = false; stopGameInput(); });
+testClose.addEventListener("click", () => { testPanel.hidden = true; });
+testApply.addEventListener("click", () => {
+  const values = {}; for (const input of document.querySelectorAll("[data-test]")) values[input.dataset.test] = Number(input.value);
+  ws?.send(JSON.stringify({ type: "test_settings", values })); playEffect("ui"); testPanel.hidden = true;
+});
+testInfectSelf.addEventListener("click", () => {
+  if (requestedMode !== "bio" || state.host_id !== myId) return;
+  ws?.send(JSON.stringify({ type: "test_infect_self" })); playEffect("hurt"); testPanel.hidden = true;
+});
+autoAimToggle.addEventListener("click", () => {
+  autoAimEnabled = !autoAimEnabled; document.documentElement.classList.toggle("auto-aim", autoAimEnabled);
+  autoAimToggle.classList.toggle("enabled", autoAimEnabled); autoAimToggle.textContent = `自动瞄准：${autoAimEnabled ? "开" : "关"}`;
+  touchAim.active = false; aimPointer = null; touchAutoShoot = false; sendInput(performance.now(), true);
+});
 function updateUpgradePanel(me) {
   const choices = ["upgrade", "bio"].includes(requestedMode) ? me?.upgrade_choices || [] : [];
   if (!choices.length) { upgradePanel.hidden = true; lastUpgradeSignature = ""; return; }
@@ -206,8 +271,8 @@ function updateUpgradePanel(me) {
   upgradeProgress.textContent = `已升至 Lv.${me.level}，选择一项永久强化`;
   for (const kind of choices) {
     const info = UPGRADE_INFO[kind], rank = me.upgrades?.[kind] || 0, button = document.createElement("button");
-    const title = document.createElement("b"), detail = document.createElement("small"), level = document.createElement("em");
-    title.textContent = `${info.icon} ${info.name}`; detail.textContent = info.text; level.textContent = `当前 ${rank}/${info.max} → ${rank + 1}/${info.max}`;
+    const title = document.createElement("b"), detail = document.createElement("small"), level = document.createElement("em"), unlimited = requestedMode === "bio" && kind !== "arsenal";
+    title.textContent = `${info.icon} ${info.name}`; detail.textContent = info.text; level.textContent = unlimited ? `当前 ${rank} → ${rank + 1}（无限）` : `当前 ${rank}/${info.max} → ${rank + 1}/${info.max}`;
     button.append(title, detail, level);
     button.addEventListener("click", () => { playEffect("pickup"); button.disabled = true; ws?.send(JSON.stringify({ type: "select_upgrade", upgrade: kind })); upgradePanel.hidden = true; });
     upgradeChoices.append(button);
@@ -216,8 +281,8 @@ function updateUpgradePanel(me) {
   if (wasHidden) stopGameInput();
 }
 function stopGameInput() {
-  keys = {}; mouse.down = false; touchMove.x = 0; touchMove.y = 0; touchAim.active = false;
-  movePointer = null; aimPointer = null;
+  keys = {}; mouse.down = false; touchMove.x = 0; touchMove.y = 0; touchAim.active = false; touchAutoShoot = false;
+  movePointer = null; aimPointer = null; autoFirePointer = null;
   joystickKnob.style.left = "50%"; joystickKnob.style.top = "50%";
   aimJoystickKnob.style.left = "50%"; aimJoystickKnob.style.top = "50%";
   sendInput(performance.now(), true);
@@ -260,7 +325,8 @@ function tone(frequency, endFrequency, duration, type, volume, delay = 0) {
   const start = audio.currentTime + delay, oscillator = audio.createOscillator(), gain = audio.createGain();
   oscillator.type = type; oscillator.frequency.setValueAtTime(Math.max(20, frequency), start);
   oscillator.frequency.exponentialRampToValueAtTime(Math.max(20, endFrequency), start + duration);
-  gain.gain.setValueAtTime(.0001, start); gain.gain.exponentialRampToValueAtTime(Math.max(.0002, volume), start + .008);
+  const amplifiedVolume = Math.min(.4, Math.max(.0002, volume * 4));
+  gain.gain.setValueAtTime(.0001, start); gain.gain.exponentialRampToValueAtTime(amplifiedVolume, start + .008);
   gain.gain.exponentialRampToValueAtTime(.0001, start + duration);
   oscillator.connect(gain); gain.connect(audio.destination); oscillator.start(start); oscillator.stop(start + duration + .02);
 }
@@ -323,11 +389,18 @@ updateSoundButton();
 function updatePowerLabel() {
   const me = state.players.find(player => player.id === myId), effects = Object.entries(me?.effects || {});
   const labels = effects.map(([kind, seconds]) => { const effect = POWERUPS[kind] || { icon: "◆", name: kind }; return `${effect.icon} ${effect.name} ${seconds.toFixed(1)}s`; });
+  if (me?.infected) labels.unshift("☣ 靠近尸体5秒可完成感染");
   if (me?.minions?.length) labels.push(`◉ 战斗随从 ×${me.minions.length}`);
   if (me?.role === "weaponmaster" && !effects.some(([kind]) => ["multishot", "laser", "beam", "ricochet", "cannon"].includes(kind))) labels.push(`⚒ 随机武器 ${Math.ceil(me.weapon_cooldown)}s`);
   if (me?.role === "paladin" && !me.effects?.invincible) labels.push(me.ability_cooldown > 0 ? `✧ 圣盾冷却 ${Math.ceil(me.ability_cooldown)}s` : "✧ 圣盾已就绪（空格）");
+  if (me?.infected && me.hp > 0) { const skill = INFECTED_SKILLS[me.zombie_form] || "感染技能"; labels.push(me.ability_cooldown > 0 ? `☣ ${skill}冷却 ${Math.ceil(me.ability_cooldown)}s` : `☣ ${skill}已就绪（空格）`); }
+  if (me?.last_survivor) labels.push("★ 孤勇者：双倍生命、伤害+60%、减伤50%");
   if (["upgrade", "bio"].includes(requestedMode)) for (const [kind, rank] of Object.entries(me?.upgrades || {})) if (rank) labels.push(`${UPGRADE_INFO[kind]?.name || kind} Lv.${rank}`);
-  powerLabel.textContent = labels.length ? labels.join("　") : requestedMode === "bio" ? "探索地图并消灭僵尸，留意掉落物" : requestedMode === "upgrade" ? "击败敌人获取经验，拾取血包恢复生命" : "寻找地图上的发光道具";
+  if (requestedMode === "bio" && state.bio?.rescue_enabled) labels.push("✚ 救援模式已开启");
+  const fallback = requestedMode === "bio" ? "探索地图并消灭僵尸，留意掉落物" : requestedMode === "upgrade" ? "击败敌人获取经验，拾取血包恢复生命" : "寻找地图上的发光道具";
+  const visibleLabels = labels.slice(0, 4), hiddenCount = labels.length - visibleLabels.length;
+  powerLabel.textContent = labels.length ? `${visibleLabels.join("　")}${hiddenCount > 0 ? `　＋${hiddenCount}项` : ""}` : fallback;
+  powerLabel.title = labels.length ? labels.join("\n") : fallback;
 }
 const KEY_CODES = { KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d", ArrowUp: "arrowup", ArrowDown: "arrowdown", ArrowLeft: "arrowleft", ArrowRight: "arrowright", Space: " " };
 function updateKey(event, pressed) {
@@ -351,18 +424,23 @@ addEventListener("keydown", event => {
   if (event.code === "Escape" || event.key === "Escape") { ws?.close(); location.reload(); }
 });
 addEventListener("keyup", event => updateKey(event, false));
-addEventListener("blur", stopGameInput);
+// 部分手机浏览器和内嵌浏览器会在地址栏/画布焦点变化时短暂触发 blur。
+// 页面仍可见时保留输入，避免角色先本地移动、随后被服务器拉回原位。
+addEventListener("blur", () => { if (document.hidden) stopGameInput(); });
+addEventListener("focus", () => sendInput(performance.now(), true));
 document.addEventListener("visibilitychange", () => { if (document.hidden) stopGameInput(); });
 canvas.addEventListener("pointermove", event => {
   if (event.pointerType !== "touch") { mouse.x = event.clientX; mouse.y = event.clientY; }
 });
 canvas.addEventListener("pointerdown", event => {
-  if (event.pointerType === "touch") { event.preventDefault(); return; }
-  event.preventDefault(); mouse.x = event.clientX; mouse.y = event.clientY; mouse.down = true;
+  if (event.pointerType === "touch") { event.preventDefault(); if (autoAimEnabled) { autoFirePointer = event.pointerId; touchAutoShoot = true; canvas.setPointerCapture?.(event.pointerId); sendInput(performance.now(), true); } return; }
+  event.preventDefault(); canvas.focus({ preventScroll: true }); mouse.x = event.clientX; mouse.y = event.clientY; mouse.down = true;
   canvas.setPointerCapture?.(event.pointerId);
+  sendInput(performance.now(), true);
 });
 function stopShooting(event) {
-  if (event.pointerType !== "touch") mouse.down = false;
+  if (event.pointerType === "touch") { if (event.pointerId === autoFirePointer) { autoFirePointer = null; touchAutoShoot = false; sendInput(performance.now(), true); } }
+  else { mouse.down = false; sendInput(performance.now(), true); }
 }
 canvas.addEventListener("pointerup", stopShooting); canvas.addEventListener("pointercancel", stopShooting);
 canvas.oncontextmenu = event => event.preventDefault();
@@ -411,15 +489,16 @@ aimJoystick.addEventListener("pointerdown", event => {
 });
 aimJoystick.addEventListener("pointermove", event => { if (event.pointerId === aimPointer) updateAimJoystick(event); });
 aimJoystick.addEventListener("pointerup", resetAimJoystick); aimJoystick.addEventListener("pointercancel", resetAimJoystick);
-addEventListener("pointerup", event => { resetJoystick(event); resetAimJoystick(event); });
-addEventListener("pointercancel", event => { resetJoystick(event); resetAimJoystick(event); });
+addEventListener("pointerup", event => { stopShooting(event); resetJoystick(event); resetAimJoystick(event); });
+addEventListener("pointercancel", event => { stopShooting(event); resetJoystick(event); resetAimJoystick(event); });
 function sendInput(now = performance.now(), force = false) {
   if (!ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > (force ? 1048576 : 65536) || (!force && now - lastSend < 33)) return;
   const me = state.players.find(player => player.id === myId); if (!me) return;
   if (requestedMode === "profession" && me.ready !== true) return;
   const movement = currentMoveVector(), aimOrigin = predictedSelf || me, canvasRect = canvas.getBoundingClientRect();
   const screenX = canvasRect.left + (aimOrigin.x - camera.x) * viewScale, screenY = canvasRect.top + (aimOrigin.y - camera.y) * viewScale;
-  const angle = touchAim.active ? Math.atan2(touchAim.y, touchAim.x) : Math.atan2(mouse.y - screenY, mouse.x - screenX);
+  const autoTarget = autoAimEnabled ? nearestAutoAimTarget(me, aimOrigin) : null;
+  const angle = autoTarget ? Math.atan2(autoTarget.y - aimOrigin.y, autoTarget.x - aimOrigin.x) : touchAim.active ? Math.atan2(touchAim.y, touchAim.x) : Math.atan2(mouse.y - screenY, mouse.x - screenX);
   const sequence = ++inputSequence;
   if (lastSentMoving && !movement.moving) lastStopSequence = sequence;
   lastSentMoving = movement.moving; lastSend = now;
@@ -427,7 +506,13 @@ function sendInput(now = performance.now(), force = false) {
     up: keys.w || keys.arrowup || touchMove.y < -.18, down: keys.s || keys.arrowdown || touchMove.y > .18,
     left: keys.a || keys.arrowleft || touchMove.x < -.18, right: keys.d || keys.arrowright || touchMove.x > .18,
     move_x: movement.x, move_y: movement.y,
-    shoot: mouse.down || touchAim.active, ability: Boolean(keys[" "]), angle }));
+    shoot: mouse.down || touchAim.active || (touchAutoShoot && Boolean(autoTarget)), ability: Boolean(keys[" "]), angle }));
+}
+function nearestAutoAimTarget(me, origin) {
+  let targets;
+  if (requestedMode === "bio") targets = me.infected ? state.players.filter(player => !player.infected && player.hp > 0) : [...(state.zombies || []), ...state.players.filter(player => player.infected && player.hp > 0)];
+  else targets = state.players.filter(player => player.id !== myId && player.hp > 0 && player.ready);
+  return targets.reduce((best, target) => !best || Math.hypot(target.x - origin.x, target.y - origin.y) < Math.hypot(best.x - origin.x, best.y - origin.y) ? target : best, null);
 }
 function visible(x, y, width = 0, height = 0, margin = 70) {
   return x + width >= camera.x - margin && x <= camera.x + sceneWidth + margin && y + height >= camera.y - margin && y <= camera.y + sceneHeight + margin;
@@ -455,19 +540,31 @@ function predictedCircleHitsRect(x, y, radius, obstacle) {
   const closestY = Math.max(obstacle.y, Math.min(y, obstacle.y + obstacle.h));
   return (x - closestX) ** 2 + (y - closestY) ** 2 < radius ** 2;
 }
+function playerMoveSpeed(player) {
+  const bioAgility = requestedMode === "bio" ? Math.min(.8, .05 * (player.upgrades?.agility || 0)) : .06 * (player.upgrades?.agility || 0);
+  let speed = player.infected ? INFECTED_MOVE_SPEEDS[player.zombie_form] || 300 : 300;
+  speed *= (player.effects?.speed ? 1.45 : 1) * (1 + bioAgility);
+  if (player.effects?.infected_frenzy) speed *= 1.45;
+  if (player.last_survivor && !player.infected) speed *= 1.35;
+  return speed;
+}
 function updateLocalPrediction(now) {
-  const dt = Math.min(Math.max(0, now - lastFrame) / 1000, .05); lastFrame = now;
+  const dt = Math.min(Math.max(0, now - lastFrame) / 1000, .15); lastFrame = now; frameDeltaSeconds = dt || 1 / 60;
   const me = state.players.find(player => player.id === myId);
   if (!me?.ready || me.hp <= 0) { predictedSelf = null; lastStopSequence = -1; lastSentMoving = false; return; }
   if (!predictedSelf) predictedSelf = { x: me.x, y: me.y };
   const movement = currentMoveVector();
-  const speed = 300 * (me.effects?.speed ? 1.45 : 1) * (1 + .06 * (me.upgrades?.agility || 0)), radius = 25;
+  const speed = playerMoveSpeed(me), radius = 25;
   predictionBlocked = false;
   if (movement.moving) {
-    const nextX = Math.max(radius, Math.min(world.width - radius, predictedSelf.x + movement.x * speed * dt));
-    if (!(state.obstacles || []).some(obstacle => predictedCircleHitsRect(nextX, predictedSelf.y, radius, obstacle))) predictedSelf.x = nextX; else predictionBlocked = true;
-    const nextY = Math.max(radius, Math.min(world.height - radius, predictedSelf.y + movement.y * speed * dt));
-    if (!(state.obstacles || []).some(obstacle => predictedCircleHitsRect(predictedSelf.x, nextY, radius, obstacle))) predictedSelf.y = nextY; else predictionBlocked = true;
+    // 低帧率时保留真实经过时间，并用小步碰撞防止穿墙；不再丢掉 50ms 以外的移动时间。
+    const movementSteps = Math.max(1, Math.ceil(dt / .025)), movementDt = dt / movementSteps;
+    for (let step = 0; step < movementSteps; step++) {
+      const nextX = Math.max(radius, Math.min(world.width - radius, predictedSelf.x + movement.x * speed * movementDt));
+      if (!(state.obstacles || []).some(obstacle => predictedCircleHitsRect(nextX, predictedSelf.y, radius, obstacle))) predictedSelf.x = nextX; else predictionBlocked = true;
+      const nextY = Math.max(radius, Math.min(world.height - radius, predictedSelf.y + movement.y * speed * movementDt));
+      if (!(state.obstacles || []).some(obstacle => predictedCircleHitsRect(predictedSelf.x, nextY, radius, obstacle))) predictedSelf.y = nextY; else predictionBlocked = true;
+    }
   }
   if (!movement.moving && lastStopSequence >= 0 && (me.input_seq ?? -1) < lastStopSequence) return;
   const stateAge = Math.max(0, now - stateReceivedAt) / 1000;
@@ -545,7 +642,7 @@ function recordMotionSnapshots(snapshot, receivedAt) {
   const seen = new Set();
   for (const player of snapshot.players || []) {
     if (player.id !== myId) {
-      const key = `p${player.id}`, speed = 300 * (player.effects?.speed ? 1.45 : 1) * (1 + .06 * (player.upgrades?.agility || 0));
+      const key = `p${player.id}`, speed = playerMoveSpeed(player);
       const moveX = Number(player.move_x) || 0, moveY = Number(player.move_y) || 0;
       recordMotionSample(key, player.x, player.y, receivedAt, moveX * speed, moveY * speed, Math.hypot(moveX, moveY) > .01);
       seen.add(key);
@@ -563,7 +660,8 @@ function recordMotionSnapshots(snapshot, receivedAt) {
     seen.add(key);
   }
   for (const zombie of snapshot.zombies || []) {
-    const key = `z${zombie.id}`, speed = zombie.boss ? 150 : zombie.kind === "runner" ? 195 : zombie.kind === "giant" ? 58 : 105;
+    const speeds = { runner: 195, giant: 58, raider: 150, infector: 92, vomiter: 68, shooter: 78, normal: 105 };
+    const key = `z${zombie.id}`, speed = zombie.boss ? 150 : speeds[zombie.kind] || 105;
     recordMotionSample(key, zombie.x, zombie.y, receivedAt, (zombie.move_x || 0) * speed, (zombie.move_y || 0) * speed,
                        Math.hypot(zombie.move_x || 0, zombie.move_y || 0) > .01);
     seen.add(key);
@@ -605,16 +703,40 @@ function drawGrid() {
 }
 function drawObstacle(o) {
   if (!visible(o.x, o.y, o.w, o.h, 20)) return;
-  const x = o.x - camera.x, y = o.y - camera.y, gradient = ctx.createLinearGradient(x, y, x, y + o.h);
+  const x = o.x - camera.x, y = o.y - camera.y;
   if (!o.active) {
     ctx.save(); ctx.globalAlpha = .32; ctx.strokeStyle = "#607da8"; ctx.lineWidth = 1; ctx.setLineDash([4, 5]);
     ctx.strokeRect(x + 2, y + 2, o.w - 4, o.h - 4); ctx.setLineDash([]);
     ctx.fillStyle = "#b8cff1"; ctx.font = "10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText(Math.ceil(o.restore), x + o.w / 2, y + o.h / 2); ctx.restore(); return;
   }
+  const gradient = ctx.createLinearGradient(x, y, x, y + o.h);
   gradient.addColorStop(0, "#314665"); gradient.addColorStop(1, "#17243b"); ctx.fillStyle = gradient; ctx.strokeStyle = "#607da8"; ctx.lineWidth = 3;
   ctx.beginPath(); ctx.roundRect(x, y, o.w, o.h, 9); ctx.fill(); ctx.stroke(); ctx.strokeStyle = "#233653"; ctx.lineWidth = 2;
   for (let offset = 20; offset < o.w; offset += 38) { ctx.beginPath(); ctx.moveTo(x + offset, y + 4); ctx.lineTo(x + offset - 14, y + o.h - 4); ctx.stroke(); }
+}
+function rebuildBioTerrainCache(signature) {
+  bioTerrainCache.width = world.width; bioTerrainCache.height = world.height;
+  const terrainContext = bioTerrainCache.getContext("2d"); terrainContext.clearRect(0, 0, world.width, world.height);
+  for (const obstacle of state.obstacles || []) {
+    if (!obstacle.active) continue;
+    const gradient = terrainContext.createLinearGradient(obstacle.x, obstacle.y, obstacle.x, obstacle.y + obstacle.h);
+    gradient.addColorStop(0, "#314665"); gradient.addColorStop(1, "#17243b");
+    terrainContext.fillStyle = gradient; terrainContext.strokeStyle = "#607da8"; terrainContext.lineWidth = 3;
+    terrainContext.beginPath(); terrainContext.roundRect(obstacle.x, obstacle.y, obstacle.w, obstacle.h, 9); terrainContext.fill(); terrainContext.stroke();
+    terrainContext.strokeStyle = "#233653"; terrainContext.lineWidth = 2;
+    for (let offset = 20; offset < obstacle.w; offset += 38) { terrainContext.beginPath(); terrainContext.moveTo(obstacle.x + offset, obstacle.y + 4); terrainContext.lineTo(obstacle.x + offset - 14, obstacle.y + obstacle.h - 4); terrainContext.stroke(); }
+  }
+  bioTerrainSignature = signature;
+}
+function drawTerrain() {
+  if (requestedMode !== "bio") { (state.obstacles || []).forEach(drawObstacle); return; }
+  const destroyed = (state.obstacles || []).filter(obstacle => !obstacle.active);
+  const signature = destroyed.map(obstacle => obstacle.id).join(",");
+  if (bioTerrainCache.width !== world.width || bioTerrainCache.height !== world.height || signature !== bioTerrainSignature) rebuildBioTerrainCache(signature);
+  const sourceWidth = Math.min(sceneWidth, world.width - camera.x), sourceHeight = Math.min(sceneHeight, world.height - camera.y);
+  if (sourceWidth > 0 && sourceHeight > 0) ctx.drawImage(bioTerrainCache, camera.x, camera.y, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
+  destroyed.forEach(drawObstacle);
 }
 function drawMinions(players) {
   for (const owner of players) for (const minion of owner.minions || []) {
@@ -634,6 +756,14 @@ function drawPickup(p, now) {
   ctx.shadowBlur = 0; ctx.fillStyle = data.color; ctx.font = "bold 22px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(data.icon, x, y + 1);
   ctx.fillStyle = "#dbe8ff"; ctx.font = "bold 11px sans-serif"; ctx.fillText(data.name, x, y + 37); ctx.restore();
 }
+function drawHazards(now) {
+  for (const hazard of state.hazards || []) {
+    if (!visible(hazard.x, hazard.y, 0, 0, hazard.radius)) continue;
+    const pulse = .88 + Math.sin(now / 130 + hazard.id) * .08, x = hazard.x - camera.x, y = hazard.y - camera.y;
+    ctx.save(); ctx.globalAlpha = Math.min(.58, .25 + hazard.life * .025); ctx.fillStyle = "#6eb52c"; ctx.strokeStyle = "#b2ff55"; ctx.lineWidth = 3; ctx.shadowBlur = mobileMode ? 7 : 18; ctx.shadowColor = "#76ff35";
+    ctx.beginPath(); ctx.arc(x, y, hazard.radius * pulse, 0, Math.PI * 2); ctx.fill(); ctx.setLineDash([8, 7]); ctx.stroke(); ctx.restore();
+  }
+}
 function zombiePoint(zombie, now) {
   return sampledMotionPoint(`z${zombie.id}`, now, zombie.x, zombie.y, 115, 70);
 }
@@ -642,13 +772,13 @@ function drawZombies(now) {
     const point = zombiePoint(zombie, now);
     if (!visible(point.x, point.y, 0, 0, zombie.radius + 12)) continue;
     const x = point.x - camera.x, y = point.y - camera.y, radius = zombie.radius || 20;
-    const colors = { normal: "#70c957", shooter: "#b875ff", giant: "#9c6b45", runner: "#d4f05a",
+    const colors = { normal: "#70c957", shooter: "#b875ff", giant: "#9c6b45", runner: "#d4f05a", raider: "#ff944d", infector: "#42e6b4", vomiter: "#a5cf39",
                      plague_lord: "#70ff70", brood_queen: "#ff5ab7", iron_abomination: "#ff704d" };
     const color = colors[zombie.kind] || "#77cc66";
     ctx.save(); ctx.shadowColor = color; ctx.shadowBlur = zombie.boss ? 28 : mobileMode ? 6 : 14;
     ctx.fillStyle = zombie.boss ? "#27101b" : "#172316"; ctx.strokeStyle = color; ctx.lineWidth = zombie.boss ? 5 : 3;
     ctx.beginPath();
-    if (zombie.kind === "runner") ctx.moveTo(x, y - radius), ctx.lineTo(x + radius, y + radius), ctx.lineTo(x - radius, y + radius), ctx.closePath();
+    if (["runner", "raider"].includes(zombie.kind)) ctx.moveTo(x, y - radius), ctx.lineTo(x + radius, y + radius), ctx.lineTo(x - radius, y + radius), ctx.closePath();
     else ctx.arc(x, y, radius, 0, Math.PI * 2);
     ctx.fill(); ctx.stroke(); ctx.shadowBlur = 0;
     ctx.fillStyle = zombie.kind === "shooter" ? "#e8c7ff" : "#ff435f";
@@ -659,11 +789,17 @@ function drawZombies(now) {
     ctx.restore();
   }
 }
-function updateBioExploration(me) {
-  if (requestedMode !== "bio" || !me) return;
-  const cell = 140, centerX = Math.floor(me.x / cell), centerY = Math.floor(me.y / cell);
+function revealBioCellsAt(x, y) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  const cell = 140, centerX = Math.floor(x / cell), centerY = Math.floor(y / cell);
   for (let offsetY = -2; offsetY <= 2; offsetY++) for (let offsetX = -2; offsetX <= 2; offsetX++)
     if (offsetX * offsetX + offsetY * offsetY <= 6) exploredBioCells.add(`${centerX + offsetX},${centerY + offsetY}`);
+}
+function updateBioExploration(me) {
+  if (requestedMode !== "bio" || !me) return;
+  // 小地图探索由同阵营的存活队友共同贡献，幸存者与感染阵营互不共享。
+  for (const teammate of state.players || [])
+    if (teammate.ready && teammate.hp > 0 && Boolean(teammate.infected) === Boolean(me.infected)) revealBioCellsAt(teammate.x, teammate.y);
 }
 function bioCellExplored(x, y) { return exploredBioCells.has(`${Math.floor(x / 140)},${Math.floor(y / 140)}`); }
 function drawBioFog(me) {
@@ -681,25 +817,29 @@ function drawBioMinimap(me, now) {
   for (const key of exploredBioCells) { const [column, row] = key.split(",").map(Number); ctx.fillStyle = "#14261d"; ctx.fillRect(x + column * cell * scaleX, y + row * cell * scaleY, cell * scaleX + 1, cell * scaleY + 1); }
   ctx.fillStyle = "#344b40";
   for (const wall of state.obstacles || []) if (wall.active && bioCellExplored(wall.x + wall.w / 2, wall.y + wall.h / 2)) ctx.fillRect(x + wall.x * scaleX, y + wall.y * scaleY, Math.max(1, wall.w * scaleX), Math.max(1, wall.h * scaleY));
-  for (const player of state.players || []) if (bioCellExplored(player.x, player.y)) { ctx.fillStyle = player.id === myId ? "#72f1d0" : player.color; ctx.beginPath(); ctx.arc(x + player.x * scaleX, y + player.y * scaleY, player.id === myId ? 4 : 3, 0, Math.PI * 2); ctx.fill(); }
+  for (const player of state.players || []) if (bioCellExplored(player.x, player.y)) { ctx.fillStyle = player.infected ? "#9cff57" : player.id === myId ? "#72f1d0" : player.color; ctx.beginPath(); ctx.arc(x + player.x * scaleX, y + player.y * scaleY, player.id === myId ? 4 : 3, 0, Math.PI * 2); ctx.fill(); }
   for (const zombie of state.zombies || []) if (Math.hypot(zombie.x - me.x, zombie.y - me.y) < 430) { ctx.fillStyle = zombie.boss ? "#ff3155" : "#9ee866"; ctx.beginPath(); ctx.arc(x + zombie.x * scaleX, y + zombie.y * scaleY, zombie.boss ? 4 : 2, 0, Math.PI * 2); ctx.fill(); }
-  ctx.restore(); ctx.fillStyle = "#9eb6a8"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "right"; ctx.fillText("探索地图", x + width - 7, y + height - 7);
+  ctx.restore(); ctx.fillStyle = "#9eb6a8"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "right"; ctx.fillText("队伍共享探索", x + width - 7, y + height - 7);
 }
 function drawBioWaveHud() {
   if (requestedMode !== "bio" || !state.bio) return;
-  const bio = state.bio, label = bio.active ? `第 ${bio.wave} 波 · 剩余 ${bio.remaining}` : bio.wave ? `第 ${bio.wave} 波完成 · ${Math.ceil(bio.next_wave)} 秒后继续` : `感染逼近 · ${Math.ceil(bio.next_wave)} 秒`;
-  ctx.save(); ctx.textAlign = "center"; ctx.font = "bold 17px sans-serif"; ctx.fillStyle = bio.boss ? "#ff6b86" : "#d8ffe2"; ctx.shadowColor = bio.boss ? "#ff3155" : "#57d98b"; ctx.shadowBlur = 12; ctx.fillText(bio.boss ? `${label} · BOSS ${bio.boss}` : label, viewWidth / 2, 32); ctx.restore();
+  const bio = state.bio, population = `幸存 ${bio.survivor_players ?? 0} · 感染 ${bio.infected_players ?? 0}`, label = bio.active ? `第 ${bio.wave} 波 · 剩余 ${bio.remaining} · ${population}` : bio.wave ? `第 ${bio.wave} 波完成 · ${Math.ceil(bio.next_wave)} 秒后继续 · ${population}` : `感染逼近 · ${Math.ceil(bio.next_wave)} 秒 · ${population}`;
+  ctx.save(); ctx.textAlign = "center"; ctx.font = "bold 17px sans-serif"; ctx.fillStyle = bio.boss ? "#ff6b86" : "#d8ffe2"; ctx.shadowColor = bio.boss ? "#ff3155" : "#57d98b"; ctx.shadowBlur = 12; ctx.fillText(bio.boss ? `${label} · BOSS ${bio.boss} · 强度 ${bio.boss_tier}` : label, viewWidth / 2, 32); ctx.restore();
 }
 function drawPlayer(p) {
   if (!p.ready) return;
   if (!visible(p.x, p.y)) return;
   const x = p.x - camera.x, y = p.y - camera.y, dead = p.hp <= 0; ctx.save(); ctx.globalAlpha = dead ? .22 : 1;
   if (p.effects?.shield) { ctx.fillStyle = "#55e6ff22"; ctx.strokeStyle = "#55e6ff"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, 34, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }
-  if (p.effects?.invincible) { ctx.fillStyle = "#ffe17a2a"; ctx.strokeStyle = "#ffe17a"; ctx.lineWidth = 5; ctx.shadowBlur = mobileMode ? 10 : 25; ctx.shadowColor = "#ffe17a"; ctx.beginPath(); ctx.arc(x, y, 38, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.shadowBlur = 0; }
-  ctx.shadowBlur = mobileMode ? 9 : 22; ctx.shadowColor = p.color; ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(x, y, 24, 0, Math.PI * 2); ctx.fill();
+  if (p.effects?.invincible || p.upgrading || p.last_survivor) { const auraColor = p.last_survivor ? "#ffcf4a" : p.upgrading ? "#72f1d0" : "#ffe17a"; ctx.fillStyle = p.last_survivor ? "#ffb21c35" : p.upgrading ? "#72f1d02a" : "#ffe17a2a"; ctx.strokeStyle = auraColor; ctx.lineWidth = p.last_survivor ? 6 : 5; ctx.shadowBlur = mobileMode ? 10 : 25; ctx.shadowColor = auraColor; ctx.beginPath(); ctx.arc(x, y, p.last_survivor ? 42 : 38, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.shadowBlur = 0; }
+  const bodyColor = p.infected ? "#86e64f" : p.color;
+  ctx.shadowBlur = mobileMode ? 9 : 22; ctx.shadowColor = bodyColor; ctx.fillStyle = bodyColor; ctx.beginPath(); ctx.arc(x, y, 24, 0, Math.PI * 2); ctx.fill();
   ctx.shadowBlur = 0; ctx.strokeStyle = "#fff"; ctx.lineWidth = p.id === myId ? 4 : 2; ctx.stroke();
   if (Object.keys(p.effects || {}).length) { ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 2; ctx.setLineDash([4, 5]); ctx.beginPath(); ctx.arc(x, y, 31, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]); }
-  ctx.fillStyle = "#eaf2ff"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center"; ctx.fillText(dead ? "复活中…" : `${["upgrade", "bio"].includes(requestedMode) ? `[Lv.${p.level || 1}] ` : ""}${p.name}`, x, y - 40);
+  ctx.globalAlpha = 1;
+  if (dead && requestedMode === "bio" && state.bio?.rescue_enabled) { const progress = Math.max(0, Math.min(10, p.rescue_progress || 0)); ctx.lineWidth = 5; ctx.strokeStyle = "#263b45"; ctx.beginPath(); ctx.arc(x, y, 34, -.5 * Math.PI, 1.5 * Math.PI); ctx.stroke(); if (progress > 0) { ctx.strokeStyle = "#72f1d0"; ctx.shadowColor = "#55d6be"; ctx.shadowBlur = 12; ctx.beginPath(); ctx.arc(x, y, 34, -.5 * Math.PI, -.5 * Math.PI + Math.PI * 2 * progress / 10); ctx.stroke(); ctx.shadowBlur = 0; } }
+  const deadLabel = requestedMode === "bio" ? p.infected ? (p.choosing_zombie ? "选择感染形态" : "感染体耗尽") : state.bio?.rescue_enabled ? (p.rescue_progress > 0 ? `救援中 ${p.rescue_progress.toFixed(1)}秒` : p.infection_progress > 0 ? `感染中 ${p.infection_progress.toFixed(1)}秒` : "等待救援") : "已阵亡" : "复活中…";
+  ctx.fillStyle = "#eaf2ff"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center"; ctx.fillText(dead ? deadLabel : `${p.infected ? `[感染体·${ZOMBIE_FORM_NAMES[p.zombie_form] || p.zombie_form}] ` : ["upgrade", "bio"].includes(requestedMode) ? `[Lv.${p.level || 1}] ` : ""}${p.name}`, x, y - 40);
   ctx.fillStyle = "#17213b"; ctx.fillRect(x - 26, y + 33, 52, 6); ctx.fillStyle = p.hp > p.max_hp / 2 ? "#55d6be" : "#ff5d73"; ctx.fillRect(x - 26, y + 33, 52 * Math.max(0, p.hp) / p.max_hp, 6); ctx.restore();
 }
 function recordSpeedTrails(players, now) {
@@ -765,7 +905,7 @@ function sampledBulletPoint(bullet, now) {
 }
 function drawProjectiles(now) {
   for (const l of state.lasers || []) { let laserX1 = l.x1, laserY1 = l.y1; if (l.owner === myId && l.segment === 0 && predictedSelf && (l.age || 0) < .18) { const blend = 1 - (l.age || 0) / .18; laserX1 += (predictedSelf.x - l.x1) * blend; laserY1 += (predictedSelf.y - l.y1) * blend; } if (!visible(Math.min(laserX1, l.x2), Math.min(laserY1, l.y2), Math.abs(l.x2 - laserX1), Math.abs(l.y2 - laserY1))) continue; ctx.save(); ctx.strokeStyle = l.color; ctx.shadowColor = l.color; ctx.shadowBlur = mobileMode ? 8 : l.beam ? 17 : 25; ctx.lineWidth = l.beam ? 7 : 11; ctx.globalAlpha = l.beam ? .18 : .25; ctx.beginPath(); ctx.moveTo(laserX1 - camera.x, laserY1 - camera.y); ctx.lineTo(l.x2 - camera.x, l.y2 - camera.y); ctx.stroke(); ctx.lineWidth = l.beam ? 2.5 : 4; ctx.globalAlpha = 1; ctx.beginPath(); ctx.moveTo(laserX1 - camera.x, laserY1 - camera.y); ctx.lineTo(l.x2 - camera.x, l.y2 - camera.y); ctx.stroke(); ctx.restore(); }
-  for (const b of state.bullets || []) { let bulletPoint = sampledBulletPoint(b, now); if (b.owner === myId && predictedSelf && (b.age || 0) < .18) { const serverMe = state.players.find(player => player.id === myId), blend = 1 - (b.age || 0) / .18; if (serverMe) bulletPoint = { x: bulletPoint.x + (predictedSelf.x - serverMe.x) * blend, y: bulletPoint.y + (predictedSelf.y - serverMe.y) * blend }; } const bulletX = bulletPoint.x, bulletY = bulletPoint.y; if (!visible(bulletX, bulletY)) continue; const radius = b.radius || 6; ctx.fillStyle = b.color; ctx.shadowBlur = mobileMode ? 7 : b.kind === "cannon" ? 28 : 16; ctx.shadowColor = b.color; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, radius, 0, Math.PI * 2); ctx.fill(); if (b.kind === "cannon") { ctx.strokeStyle = "#ffe2a8"; ctx.lineWidth = 4; ctx.stroke(); } else if (b.kind === "zombie") { ctx.strokeStyle = "#d8ff9c"; ctx.lineWidth = 2; ctx.stroke(); ctx.fillStyle = "#264b1c"; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, Math.max(2, radius - 4), 0, Math.PI * 2); ctx.fill(); } else if (b.kind === "mage") { ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke(); } else if (b.kind === "sniper") { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, 2, 0, Math.PI * 2); ctx.fill(); } else if (b.bounces > 0) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); } } ctx.shadowBlur = 0;
+  for (const b of state.bullets || []) { let bulletPoint = sampledBulletPoint(b, now); if (b.owner === myId && predictedSelf && (b.age || 0) < .18) { const serverMe = state.players.find(player => player.id === myId), blend = 1 - (b.age || 0) / .18; if (serverMe) bulletPoint = { x: bulletPoint.x + (predictedSelf.x - serverMe.x) * blend, y: bulletPoint.y + (predictedSelf.y - serverMe.y) * blend }; } const bulletX = bulletPoint.x, bulletY = bulletPoint.y; if (!visible(bulletX, bulletY)) continue; const radius = b.radius || 6; ctx.fillStyle = b.color; ctx.shadowBlur = mobileMode ? 7 : b.kind === "cannon" ? 28 : 16; ctx.shadowColor = b.color; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, radius, 0, Math.PI * 2); ctx.fill(); if (b.kind === "cannon") { ctx.strokeStyle = "#ffe2a8"; ctx.lineWidth = 4; ctx.stroke(); } else if (["zombie", "vomit", "infected", "infected_vomit"].includes(b.kind)) { ctx.strokeStyle = b.kind.includes("vomit") ? "#e4ff75" : "#d8ff9c"; ctx.lineWidth = 2; ctx.stroke(); ctx.fillStyle = b.kind.includes("vomit") ? "#65851f" : "#264b1c"; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, Math.max(2, radius - 4), 0, Math.PI * 2); ctx.fill(); } else if (b.kind === "mage") { ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke(); } else if (b.kind === "sniper") { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(bulletX - camera.x, bulletY - camera.y, 2, 0, Math.PI * 2); ctx.fill(); } else if (b.bounces > 0) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); } } ctx.shadowBlur = 0;
   for (const blast of state.explosions || []) { if (!visible(blast.x, blast.y, 0, 0, blast.radius)) continue; const total = blast.magic ? .25 : .35, alpha = Math.max(0, blast.life / total), radius = blast.radius * (1 - alpha * .45); ctx.save(); ctx.globalAlpha = alpha; ctx.fillStyle = `${blast.color}44`; ctx.strokeStyle = blast.magic ? "#f6e8ff" : blast.color; ctx.lineWidth = blast.magic ? 4 : 7; ctx.shadowBlur = mobileMode ? 10 : 30; ctx.shadowColor = blast.color; ctx.beginPath(); ctx.arc(blast.x - camera.x, blast.y - camera.y, radius, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore(); }
 }
 function render(now) {
@@ -773,9 +913,9 @@ function render(now) {
   const displayPlayers = smoothedPlayers(now), me = displayPlayers.find(player => player.id === myId);
   updateBioExploration(me);
   recordSpeedTrails(displayPlayers, now);
-  if (me) { camera.x += (me.x - sceneWidth / 2 - camera.x) * .12; camera.y += (me.y - sceneHeight / 2 - camera.y) * .12; camera.x = Math.max(0, Math.min(world.width - sceneWidth, camera.x)); camera.y = Math.max(0, Math.min(world.height - sceneHeight, camera.y)); }
+  if (me) { const cameraBlend = 1 - Math.exp(-7.7 * frameDeltaSeconds); camera.x += (me.x - sceneWidth / 2 - camera.x) * cameraBlend; camera.y += (me.y - sceneHeight / 2 - camera.y) * cameraBlend; camera.x = Math.max(0, Math.min(world.width - sceneWidth, camera.x)); camera.y = Math.max(0, Math.min(world.height - sceneHeight, camera.y)); }
   ctx.save(); ctx.scale(viewScale, viewScale);
-  drawGrid(); (state.pickups || []).forEach(p => drawPickup(p, now)); (state.obstacles || []).forEach(drawObstacle); drawSpeedTrails(now); drawZombies(now); drawProjectiles(now); drawMinions(displayPlayers); displayPlayers.forEach(drawPlayer); drawBioFog(me);
+  drawGrid(); (state.pickups || []).forEach(p => drawPickup(p, now)); drawTerrain(); drawSpeedTrails(now); drawHazards(now); drawZombies(now); drawProjectiles(now); drawMinions(displayPlayers); displayPlayers.forEach(drawPlayer); drawBioFog(me);
   ctx.restore();
   const board = [...state.players].sort((a, b) => b.score - a.score); ctx.textAlign = "right"; ctx.font = "bold 14px sans-serif";
   if (requestedMode !== "bio") board.forEach((p, i) => { ctx.fillStyle = p.id === myId ? "#72f1d0" : "#c5d1e6"; ctx.fillText(`${i + 1}. ${requestedMode === "upgrade" ? `[Lv.${p.level || 1}] ` : ""}${p.name}  ${p.score}`, viewWidth - 20, 32 + i * 22); });
@@ -784,3 +924,5 @@ function render(now) {
   sendInput(now); requestAnimationFrame(render);
 }
 requestAnimationFrame(render);
+// 渲染循环负责低延迟发送，独立循环负责掉帧兜底；lastSend 会自动合并重复输入。
+setInterval(() => sendInput(performance.now()), INPUT_INTERVAL_MS);
