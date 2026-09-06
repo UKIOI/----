@@ -57,10 +57,22 @@ async def main():
     unit_room.explode_cannon(cannonball, time.monotonic())
     destroyed = [block for block in unit_room.terrain if not block["active"]]
     assert destroyed and all(block["restore"] > time.monotonic() + 4.8 for block in destroyed), "大炮没有摧毁地形或设置恢复时间"
+    blocked_wall = destroyed[0]
+    unit_room.zombies = [{"id": "restore-test", "hp": 50, "radius": 21,
+                          "x": blocked_wall["x"] + blocked_wall["w"] / 2,
+                          "y": blocked_wall["y"] + blocked_wall["h"] / 2}]
     for block in destroyed:
         block["restore"] = time.monotonic() - 1
+    restore_now = time.monotonic()
+    unit_room.restore_terrain(restore_now)
+    assert not blocked_wall["active"] and blocked_wall["restore"] >= restore_now + .49, "地形恢复时没有等待墙内僵尸离开"
+    postponed = [block for block in destroyed if not block["active"]]
+    assert postponed and all(block["restore"] >= restore_now + .49 for block in postponed), "被僵尸占用的相邻地形没有统一延期恢复"
+    unit_room.zombies[0]["x"], unit_room.zombies[0]["y"] = 30, 30
+    for block in postponed:
+        block["restore"] = time.monotonic() - 1
     unit_room.restore_terrain(time.monotonic())
-    assert all(block["active"] for block in destroyed), "地形没有在倒计时结束后恢复"
+    assert all(block["active"] for block in destroyed), "僵尸离开后地形没有恢复"
     wall_bounce = {"x": 240, "y": 170, "vx": 100, "vy": 0, "bounces": 3}
     assert unit_room.advance_bullet(wall_bounce, 0.2) and wall_bounce["vx"] == -100, "子弹障碍物反弹错误"
     wall_shot = {"x": 225, "y": 170, "vx": 760, "vy": 0, "radius": 6, "bounces": 0}
@@ -281,14 +293,15 @@ async def main():
     bio_mechanics = Room("BIO_MECHANICS", "bio")
     survivor = {**bio_player, "id": "mechanic-survivor", "x": 1000, "y": 800, "hp": 100, "max_hp": 100,
                 "effects": {}, "minions": [], "upgrades": {"power": 3}, "upgrade_choices": ["power"],
-                "infected": False, "input": {**bio_player["input"]}}
-    corpse = {**survivor, "id": "mechanic-corpse", "x": 1200, "y": 800, "hp": 0,
+                "infected": False, "last_survivor": False, "input": {**bio_player["input"]}}
+    corpse = {**survivor, "id": "mechanic-corpse", "x": 1200, "y": 800, "hp": 100,
               "upgrades": {}, "upgrade_choices": [], "input": {**survivor["input"]}}
     bio_mechanics.players = {survivor["id"]: survivor, corpse["id"]: corpse}
     assert bio_mechanics.apply_upgrade(survivor, "power") and survivor["upgrades"]["power"] == 4, "生化模式仍限制重复强化等级"
     bio_mechanics.apply_test_settings({"player_hp": 180, "bullet_damage": 42, "weapon_duration": 22,
                                        "zombie_hp_scale": 2, "zombie_damage_scale": 1.5})
-    assert bio_mechanics.test_settings["bullet_damage"] == 42 and survivor["max_hp"] == 180, "房主测试参数没有应用到房间"
+    assert bio_mechanics.test_settings["bullet_damage"] == 42 and survivor["max_hp"] == 180, f"房主测试参数没有应用到房间: max_hp={survivor['max_hp']}"
+    corpse["hp"] = 0
     bio_mechanics.wave, bio_mechanics.wave_active, bio_mechanics.next_wave = 11, True, bio_now + 100
     raider = bio_mechanics.spawn_zombie("raider", bio_now)
     assert raider["disguised"] and not raider["revealed"], "第 11 波后的突袭者没有伪装"
@@ -348,7 +361,8 @@ async def main():
                          "zombie_form": "normal", "effects": {}, "last_shot": 0,
                          "input": {**bio_player["input"], "shoot": True, "ability": False, "angle": 0}}
     melee_target = {**bio_player, "id": "melee-target", "x": 180, "y": 100, "hp": 100,
-                    "effects": {}, "infected": False, "input": {**bio_player["input"], "shoot": False}}
+                    "effects": {}, "infected": False, "last_survivor": False,
+                    "input": {**bio_player["input"], "shoot": False}}
     distant_target = {**melee_target, "id": "distant-target", "x": 700,
                       "input": {**melee_target["input"]}}
     attack_room.players = {player["id"]: player for player in (infected_attacker, melee_target, distant_target)}
@@ -366,17 +380,17 @@ async def main():
     last_room.players = {"last": last_player}
     last_room.update_last_survivor(bio_now)
     assert not last_player["last_survivor"] and last_player["hp"] == 40, "单人生化模式错误触发了孤勇者"
-    infected_teammate = {**last_player, "id": "infected-teammate", "hp": 100, "infected": True,
-                         "zombie_form": "normal", "effects": {}, "input": {**last_player["input"]}}
-    last_room.players["infected-teammate"] = infected_teammate
+    fallen_teammate = {**last_player, "id": "fallen-teammate", "hp": 0, "infected": False,
+                       "effects": {}, "input": {**last_player["input"]}}
+    last_room.players["fallen-teammate"] = fallen_teammate
     last_room.update_last_survivor(bio_now)
-    assert last_player["last_survivor"] and last_player["max_hp"] == 200 and last_player["hp"] == 80 and last_player["effects"]["invincible"] == bio_now + 2, "孤勇者没有获得双倍最大生命和当前生命"
+    assert last_player["last_survivor"] and last_player["max_hp"] == 200 and last_player["hp"] == 80 and last_player["effects"]["invincible"] == bio_now + 2, "队友仅阵亡但尚未感染时没有触发孤勇者"
     last_room.update_last_survivor(bio_now + 1)
     assert last_player["max_hp"] == 200 and last_player["hp"] == 80, "孤勇者生命强化被重复叠加"
     last_player["effects"].clear()
     last_room.damage(last_player, 20, "zombie", bio_now + 3)
     assert last_player["hp"] == 70, "孤勇者没有获得 50% 减伤"
-    infected_teammate["infected"] = False
+    fallen_teammate["hp"] = 100
     last_room.update_last_survivor(bio_now + 4)
     assert not last_player["last_survivor"] and last_player["max_hp"] == 100 and abs(last_player["hp"] - 35) < .01, "孤勇者状态结束后生命比例未正确还原"
     last_room.task.cancel()
@@ -400,7 +414,7 @@ async def main():
     async with aiohttp.ClientSession() as session:
         async with session.get(f"{base_url}/health") as response:
             health = await response.json()
-            assert health == {"game": "neon-brawl", "edition": "internet", "status": "ok", "protocol": 16, "build": 69}, "互联网版健康检查标识错误"
+            assert health == {"game": "neon-brawl", "edition": "internet", "status": "ok", "protocol": 16, "build": 72}, "互联网版健康检查标识错误"
         async with session.get(f"{base_url}/rooms") as response:
             assert await response.json() == {"rooms": []}, "空服务器的公开房间列表不正确"
         async with session.get(f"{base_url}/") as response:
@@ -420,14 +434,16 @@ async def main():
             assert "升级模式强化" in page and "进入升级选择时会持续无敌" in page and "无敌并加速 7 秒" in page, "升级无敌或圣骑士新规则未写入玩法说明"
             assert 'option value="bio"' in page and "生化模式" in page and "瘟疫领主" in page and "钢铁畸变体" in page and "永久阵亡" in page, "生化模式入口、阵亡规则或玩法说明未加载"
             assert "260生命" in page and "同阵营队友会共享小地图探索视野" in page, "感染形态属性或小地图共享规则未写入界面"
-            assert '/static/style.css?v=21' in page and '/static/game.js?v=69' in page, "客户端缓存版本未更新"
+            assert 'id="authorCredit"' in page and "作者：沈奕安" in page, "开始界面作者署名未加载"
+            assert '/static/style.css?v=22' in page and '/static/game.js?v=72' in page, "客户端缓存版本未更新"
             assert response.headers.get("Cache-Control") == "no-store, no-cache, must-revalidate, max-age=0", "入口页没有禁止旧客户端缓存"
-        async with session.get(f"{base_url}/static/style.css?v=21") as response:
+        async with session.get(f"{base_url}/static/style.css?v=22") as response:
             mobile_style = await response.text()
             assert '@media (orientation: portrait)' in mobile_style and 'html.mobile-controls #rotateNotice { display: none; }' in mobile_style, "手机竖屏可玩布局未加载"
             assert 'width: min(116px, 29vw)' in mobile_style and 'height: min(52vh, 390px)' in mobile_style, "竖屏轮盘或聊天布局未适配"
             assert "max-width: min(560px, calc(48vw - 24px))" in mobile_style and "text-overflow: ellipsis" in mobile_style, "Buff 面板没有限制宽度或溢出"
-        async with session.get(f"{base_url}/static/game.js?v=69") as response:
+            assert "#authorCredit" in mobile_style and "env(safe-area-inset-right)" in mobile_style and "env(safe-area-inset-bottom)" in mobile_style, "作者署名或手机安全区域适配未加载"
+        async with session.get(f"{base_url}/static/game.js?v=72") as response:
             mobile_script = await response.text()
             assert response.headers.get("Cache-Control") == "no-store, no-cache, must-revalidate, max-age=0", "客户端脚本没有禁止缓存"
             assert "visualViewport" in mobile_script and "viewWidth" in mobile_script and "orientationchange" in mobile_script, "动态横屏适配脚本未加载"
@@ -450,7 +466,7 @@ async def main():
             assert "stop_x" not in mobile_script and "predictionHoldUntil" not in mobile_script, "旧的停止补位逻辑仍在客户端"
             assert "event.repeat" in mobile_script and "visibilitychange" in mobile_script and "if (document.hidden) stopGameInput()" in mobile_script and "canvas.focus({ preventScroll: true })" in mobile_script, "卡键、瞬时失焦或页面后台输入保护未加载"
             assert all(marker in mobile_script for marker in ('refreshRoomBrowser', 'fetch("/rooms"', 'room.players', 'room.mode')), "公开房间列表读取或选择逻辑未加载"
-            assert all(marker in mobile_script for marker in ("BUILD_VERSION = 69", "neon-protocol-refresh", "location.replace", "主机仍在运行旧版服务器", "该房间已使用其他玩法模式")), "版本自动刷新、构建检查或模式错误提示未加载"
+            assert all(marker in mobile_script for marker in ("BUILD_VERSION = 72", "neon-protocol-refresh", "location.replace", "主机仍在运行旧版服务器", "该房间已使用其他玩法模式")), "版本自动刷新、构建检查或模式错误提示未加载"
             assert "靠近尸体5秒可完成感染" in mobile_script, "感染玩家的尸体感染提示未加载"
             assert all(marker in mobile_script for marker in ("testInfectSelf", "test_infect_self", "infected_players", "survivor_players", "room.infected")), "直接感染、感染人数或房间感染统计没有加载"
             assert "? .57 : .66" in mobile_script and "volume * 4" in mobile_script and "Math.min(.4" in mobile_script, "手机视野缩放或四倍音量没有加载"
@@ -469,7 +485,7 @@ async def main():
         first_welcome = json.loads((await first.receive()).data)
         second_welcome = json.loads((await second.receive()).data)
         assert first_welcome["room"] == run_id and second_welcome["room"] == run_id
-        assert first_welcome["protocol"] == 16 and first_welcome["build"] == 69 and first_welcome["edition"] == "internet" and len(first_welcome["obstacles"]) > 8, "初始地形、构建版本或压缩协议未发送"
+        assert first_welcome["protocol"] == 16 and first_welcome["build"] == 72 and first_welcome["edition"] == "internet" and len(first_welcome["obstacles"]) > 8, "初始地形、构建版本或压缩协议未发送"
         for _ in range(20):
             state = json.loads((await first.receive()).data)
             player_names = {player["name"] for player in state.get("players", [])}

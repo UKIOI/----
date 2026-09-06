@@ -62,7 +62,7 @@ const POWERUPS = {
   infected_frenzy: { icon: "☣", name: "感染狂暴", color: "#9cff57" },
 };
 const PROTOCOL_VERSION = 16;
-const BUILD_VERSION = 69;
+const BUILD_VERSION = 72;
 const INPUT_INTERVAL_MS = 33;
 let ws, myId = null, requestedMode = "classic", world = { width: 1600, height: 900 };
 let state = { players: [], bullets: [], lasers: [], explosions: [], pickups: [], obstacles: [], zombies: [], hazards: [], bio: null };

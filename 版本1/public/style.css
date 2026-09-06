@@ -3,6 +3,7 @@
 html, body { width: 100%; height: 100%; }
 body { margin: 0; overflow: hidden; overscroll-behavior: none; background: radial-gradient(circle at 50% 20%, #19274c, #080d1b 65%); }
 #menu { width: var(--view-width); height: var(--view-height); display: grid; place-items: center; overflow: auto; padding: max(10px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left)); }
+#authorCredit { position: fixed; right: max(14px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); z-index: 2; padding: 6px 10px; border: 1px solid #31487888; border-radius: 999px; background: #0b132899; color: #8fa4c8; font-size: 12px; letter-spacing: .04em; pointer-events: none; backdrop-filter: blur(6px); }
 .card { width: min(90vw, 390px); padding: 36px; border: 1px solid #314878; border-radius: 24px; background: #101a32dd; box-shadow: 0 25px 80px #0009; text-align: center; }
 .logo { font-size: 48px; }
 h1 { font-size: 38px; margin: 5px 0; color: #72f1d0; text-shadow: 0 0 25px #38d9b766; }

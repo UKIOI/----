@@ -16,7 +16,7 @@ BIO_WIDTH, BIO_HEIGHT = 2800, 1800
 TICK_RATE = 30
 NETWORK_RATE = 25
 PROTOCOL_VERSION = 16
-BUILD_VERSION = 69
+BUILD_VERSION = 72
 PLAYER_SPEED = 300
 BULLET_SPEED = 760
 CHAT_MAX_LENGTH = 120
@@ -211,8 +211,16 @@ class Room:
         for block in self.terrain:
             if block["active"] or now < block["restore"]:
                 continue
-            occupied = any(p["hp"] > 0 and circle_hits_rect(p["x"], p["y"], PLAYER_RADIUS, block)
-                           for p in self.players.values())
+            occupied_by_player = any(
+                player["hp"] > 0 and circle_hits_rect(player["x"], player["y"], PLAYER_RADIUS, block)
+                for player in self.players.values())
+            occupied_by_zombie = any(
+                zombie["hp"] > 0 and circle_hits_rect(zombie["x"], zombie["y"], zombie["radius"], block)
+                for zombie in self.zombies)
+            occupied_by_minion = any(
+                minion["hp"] > 0 and circle_hits_rect(minion["x"], minion["y"], 14, block)
+                for player in self.players.values() for minion in player.get("minions", []))
+            occupied = occupied_by_player or occupied_by_zombie or occupied_by_minion
             if occupied:
                 block["restore"] = now + 0.5
             else:
@@ -757,8 +765,7 @@ class Room:
         members = self.humans()
         survivors = [player for player in members
                      if player.get("ready") and player.get("hp", 0) > 0 and not player.get("infected")]
-        has_infected_teammate = any(player.get("infected") for player in members)
-        survivor_id = survivors[0]["id"] if len(members) >= 2 and has_infected_teammate and len(survivors) == 1 else None
+        survivor_id = survivors[0]["id"] if len(members) >= 2 and len(survivors) == 1 else None
         for player in members:
             was_active = player.get("last_survivor", False)
             active = player["id"] == survivor_id
